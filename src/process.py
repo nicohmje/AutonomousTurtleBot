@@ -724,18 +724,24 @@ class CameraProcess:
         upper_stepline2 = np.array([self.stepline2_H_u, self.stepline2_S_u, self.stepline2_V_u])
 
 
-		# Create masks for left and right colors
+		# Create masks for left, right and stepline colors
         mask_left = cv.inRange(hsv, lower_left, upper_left)
         mask_right = cv.inRange(hsv, lower_right, upper_right)
         mask_stepline1 = cv.inRange(hsv, lower_stepline1, upper_stepline1)
         mask_stepline2 = cv.inRange(hsv, lower_stepline2, upper_stepline2)
         masked_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
 
+        # In the real world, the right lane is red, so we use the red color (with the two ranges). 
+        # It's easier to just switch stepline and right than to change everything. 
 
-		# Bitwise AND masks with original image
-        masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
-        masked_right = cv.bitwise_and(image, rectangle, mask=mask_right)
+        if self.sim:
+            masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
+            masked_right = cv.bitwise_and(image, rectangle, mask=mask_right)
+        else:
+            masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
+            masked_right = cv.bitwise_and(image, rectangle, mask=masked_stepline_inter)
 
+        
 		# Combine masked images
         masked_frame = masked_left + masked_right
 
@@ -746,7 +752,12 @@ class CameraProcess:
             rectangle[:, :60, :] = 0
             rectangle[:, 260:, :] = 0
 
-        masked_stepline = cv.bitwise_and(image, rectangle, mask=masked_stepline_inter)
+
+        if self.sim:
+            masked_stepline = cv.bitwise_and(image, rectangle, mask=masked_stepline_inter)
+        else:
+            masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_right)
+
 
         if (np.argwhere(masked_stepline > 0).any()):
             self.detect_stepline = True
