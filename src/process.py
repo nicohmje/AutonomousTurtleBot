@@ -36,7 +36,7 @@ class CameraProcess:
             self.laser_scan = None
 
             self.detect_stepline = False
-            self.step = 0
+            self.step = 1
 
             self.ang_vel = 0
             self.cmd_speed = 0
@@ -112,6 +112,8 @@ class CameraProcess:
             else:
                 self.lidar_only()
                 pass
+        else:
+            self.lane_assist_controller()
 
 
         # print("ang_vel = ", self.ang_vel)
@@ -120,7 +122,7 @@ class CameraProcess:
 
         # print(self.cmd_twist)
 
-        #speed pub
+        # speed pub
         self.cmd_vel_pub.publish(self.cmd_twist)
 
 
@@ -135,7 +137,7 @@ class CameraProcess:
 
         # offset = 75
 
-        Kp = 3.0
+        Kp = 4.0
 
         # print(90 - np.argmax(self.laser_scan.ranges))
 
@@ -157,7 +159,9 @@ class CameraProcess:
         print("left ", dst_left)
         print("right ", dst_right)
 
-        self.ang_vel = dir
+
+        if abs(dir) > 0.1:
+            self.ang_vel = dir
         self.cmd_speed = 0.1
 
 
@@ -239,7 +243,7 @@ class CameraProcess:
                 if (cell[0] * cell[1] < 0) or (cell[0] >= self.grid_height) or (cell[1] >= self.grid_width):
                     continue
                 try:
-                    if self.occupancy_grid2[cell[0], cell[1]] == self.IS_OCCUPIED:
+                    if self.occupancy_grid[cell[0], cell[1]] == self.IS_OCCUPIED:
                         obstacles.append(cell)
                         break
                 except:
@@ -302,9 +306,8 @@ class CameraProcess:
         
 
     def callback_image_rect(self, msg):
-            pass
-    #     self.cv_image_rect = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-    #     self.second_process(self.cv_image_rect)
+        self.cv_image_rect = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        self.second_process(self.cv_image_rect)
 
 
     def obstacle_detection(self):
@@ -313,14 +316,14 @@ class CameraProcess:
             return False
         # print("Obstacles left front right ", self.obs_left, self.obs_front, self.obs_right)
         
+        print(self.occupancy_grid.shape)
+
+        MARGIN = 4
+        current_pos = (25,0)
+        goal_pos = (25,10)
 
 
-        MARGIN = 2
-        current_pos = (12,0)
-        goal_pos = (12,5)
-
-
-        error = 12 - (np.mean(self.check_collision(current_pos, goal_pos, margin=MARGIN), axis = 0))
+        error = 25 - (np.mean(self.check_collision(current_pos, goal_pos, margin=MARGIN), axis = 0))
 
         # print("error", error)
 
@@ -340,10 +343,10 @@ class CameraProcess:
     
         rows, cols = self.image.shape[:2]
         
-        speed = 0.05
+        speed = 0.2
 
         if self.step == 2:
-            speed = 0.1
+            speed = 0.2
 
         print("left, right", self.left_lane, self.right_lane)
 
@@ -399,7 +402,7 @@ class CameraProcess:
         if self.sim:
             Kp = -0.1 #-0.2 in si,m
         else:
-            Kp = -0.025
+            Kp = -0.02
 
         self.cmd_speed =  speed #0.22
         self.ang_vel = self.error * Kp#0.03
@@ -420,23 +423,44 @@ class CameraProcess:
 
         hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
 
-        lower_yellow = np.array([self.left_H_l,self.left_S_l,self.left_V_l])
-        upper_yellow = np.array([self.left_H_u,self.left_S_u,self.left_V_u])
 
-        # Define HSV thresholds for red color
-        lower_right = np.array([self.right_H_l, self.right_S_l, self.right_V_l])
-        upper_right = np.array([self.right_H_u, self.right_S_u, self.right_V_u])
+        if self.sim:
+            lower_yellow = np.array([self.left_H_l,self.left_S_l,self.left_V_l])
+            upper_yellow = np.array([self.left_H_u,self.left_S_u,self.left_V_u])
+
+            # Define HSV thresholds for red color
+            lower_right = np.array([self.right_H_l, self.right_S_l, self.right_V_l])
+            upper_right = np.array([self.right_H_u, self.right_S_u, self.right_V_u])
+
+            # Create masks for yellow and white colors
+            mask_left = cv.inRange(hsv, lower_yellow, upper_yellow)
+            mask_right = cv.inRange(hsv, lower_right, upper_right)
+
+        else:
+            lower_left = np.array([self.left_H_l, self.left_S_l, self.left_V_l])
+            upper_left = np.array([self.left_H_u, self.left_S_u, self.left_V_u])
+
+            lower_stepline1 = np.array([self.stepline1_H_l, self.stepline1_S_l, self.stepline1_V_l])
+            upper_stepline1 = np.array([self.stepline1_H_u, self.stepline1_S_u, self.stepline1_V_u])
+            lower_stepline2 = np.array([self.stepline2_H_l, self.stepline2_S_l, self.stepline2_V_l])
+            upper_stepline2 = np.array([self.stepline2_H_u, self.stepline2_S_u, self.stepline2_V_u])
+
+
+            mask_left = cv.inRange(hsv, lower_left, upper_left)
+
+            mask_stepline1 = cv.inRange(hsv, lower_stepline1, upper_stepline1)
+            mask_stepline2 = cv.inRange(hsv, lower_stepline2, upper_stepline2)
+            mask_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
+            
+            kernel = np.ones((15,15), np.uint8)
+            mask_right = cv.morphologyEx(mask_stepline_inter, cv.MORPH_CLOSE, kernel)
 
 
 
-		# Create masks for yellow and white colors
-        mask_yellow = cv.inRange(hsv, lower_yellow, upper_yellow)
-        mask_right = cv.inRange(hsv, lower_right, upper_right)
 
+        mask_frame = mask_left + mask_right
 
-        masked_frame = mask_yellow + mask_right
-
-        return masked_frame
+        return mask_frame
 
     #Function that defines the polygon region of interest
     def regionOfInterest(self,img, polygon):
@@ -554,11 +578,12 @@ class CameraProcess:
             destination_points = np.float32([[0,0], [500,0], [0,600],[500, 600]])
 
         warped_img_size = (800, 450)
-        warped_img = self.warp(processed_img, source_points, destination_points, warped_img_size)
-        
+        warped_img = self.warp(processed_img, source_points, destination_points, warped_img_size)        
     
         kernel = np.ones((41,41), np.uint8)
         opening = cv.morphologyEx(warped_img, cv.MORPH_CLOSE, kernel)
+
+
 
         warped_img_shape = (warped_img.shape)
 
@@ -598,7 +623,7 @@ class CameraProcess:
         )
         self.occupancy_grid2 = np.clip(self.occupancy_grid2, 0, 50)
 
-        self.merge_occup_grids()
+        # self.merge_occup_grids()
 
 
         left_radius, right_radius, avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
@@ -623,6 +648,8 @@ class CameraProcess:
         # print(self.ang_vel)
         # print("Heading error ", self.heading_error[0])
         # print("Crosstrack error ", self.crosstrack_error[0])
+
+
         
         pass
 
@@ -749,6 +776,10 @@ class CameraProcess:
         mask_stepline2 = cv.inRange(rectangle, lower_stepline2, upper_stepline2)
         mask_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
 
+        mask_stepline_inter = cv.morphologyEx(mask_stepline_inter, cv.MORPH_CLOSE, kernel)
+
+
+
         # In the real world, the right lane is red, so we use the red color (with the two ranges). 
         # It's easier to just switch stepline and right than to change everything. 
 
@@ -790,8 +821,13 @@ class CameraProcess:
         stepline_area = area
 
 
-        # print("AREA STEPLINE  ", stepline_area)
-        if (stepline_area > 2400 and stepline_area < 3200):
+        print("AREA STEPLINE  ", stepline_area)
+
+        lower = (15000,2400)[self.sim]
+        upper = (30000,3200)[self.sim]
+
+
+        if (stepline_area > lower and stepline_area < upper):
             
             if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < 10):
                 print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
@@ -860,6 +896,8 @@ class CameraProcess:
 
         image_message = self.bridge.cv2_to_imgmsg(self.image, "passthrough")
         self.image_pub.publish(image_message)
+
+
 
         
 
