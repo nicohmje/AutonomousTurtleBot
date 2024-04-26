@@ -121,7 +121,7 @@ class CameraProcess:
         # print(self.cmd_twist)
 
         #speed pub
-        # self.cmd_vel_pub.publish(self.cmd_twist)
+        self.cmd_vel_pub.publish(self.cmd_twist)
 
 
 
@@ -239,7 +239,7 @@ class CameraProcess:
                 if (cell[0] * cell[1] < 0) or (cell[0] >= self.grid_height) or (cell[1] >= self.grid_width):
                     continue
                 try:
-                    if self.occupancy_grid[cell[0], cell[1]] == self.IS_OCCUPIED:
+                    if self.occupancy_grid2[cell[0], cell[1]] == self.IS_OCCUPIED:
                         obstacles.append(cell)
                         break
                 except:
@@ -253,7 +253,10 @@ class CameraProcess:
     def get_params(self, event=True):
         rospy.loginfo("Updating the parameters")
 
-        self.sim = rospy.get_param("use_sim_time")
+        try:
+            self.sim = rospy.get_param("use_sim_time")
+        except:
+            self.sim = False
 
         # Yellow Color Gains
         self.left_H_l = rospy.get_param("/left_H_l", default=77)
@@ -299,8 +302,9 @@ class CameraProcess:
         
 
     def callback_image_rect(self, msg):
-        self.cv_image_rect = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        self.second_process(self.cv_image_rect)
+            pass
+    #     self.cv_image_rect = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+    #     self.second_process(self.cv_image_rect)
 
 
     def obstacle_detection(self):
@@ -309,6 +313,8 @@ class CameraProcess:
             return False
         # print("Obstacles left front right ", self.obs_left, self.obs_front, self.obs_right)
         
+
+
         MARGIN = 2
         current_pos = (12,0)
         goal_pos = (12,5)
@@ -334,7 +340,7 @@ class CameraProcess:
     
         rows, cols = self.image.shape[:2]
         
-        speed = 0.2
+        speed = 0.05
 
         if self.step == 2:
             speed = 0.1
@@ -377,7 +383,7 @@ class CameraProcess:
 
         self.error = center_of_road - self.image.shape[1]//2
 
-        self.error = max(min(10, self.error),-10)
+        # self.error = max(min(10, self.error),-10)
 
         print("error", self.error)
 
@@ -390,8 +396,10 @@ class CameraProcess:
         except:
             self.error_pub.publish(Int32(0))
 
-
-        Kp = -0.1
+        if self.sim:
+            Kp = -0.1 #-0.2 in si,m
+        else:
+            Kp = -0.025
 
         self.cmd_speed =  speed #0.22
         self.ang_vel = self.error * Kp#0.03
@@ -622,9 +630,11 @@ class CameraProcess:
     def merge_occup_grids(self):
         
 
-        print("shp", self.occupancy_grid2.shape)
+        # print("shp", self.occupancy_grid2.shape)
+        # print("shp", self.occupancy_grid.shape)
 
-        lidar_occup = self.occupancy_grid
+
+        lidar_occup = np.copy(self.occupancy_grid)
 
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
 
@@ -695,8 +705,10 @@ class CameraProcess:
             rectangle[:150, :, :] = 0
             # rectangle[220:, :, :] = 0
         else:
-            rectangle[:, :40, :] = 0 
-            rectangle[:, 280:, :] = 0
+            pass
+            # rectangle[]
+            # rectangle[:, :40, :] = 0 
+            # rectangle[:, 280:, :] = 0
 
 
 
@@ -719,15 +731,19 @@ class CameraProcess:
         mask_left = cv.inRange(rectangle, lower_left, upper_left)
         mask_right = cv.inRange(rectangle, lower_right, upper_right)
 
+
+
         kernel = np.ones((15,15), np.uint8)
         mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel)
         mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel)
 
         if not self.sim:
-            rectangle[:350, : : ] = 0
+            pass
+            # rectangle[:350, : : ] = 0
         else:
-            rectangle[:, :60, :] = 0
-            rectangle[:, 280:, :] = 0
+            pass
+            # rectangle[:, :60, :] = 0
+            # rectangle[:, 280:, :] = 0
 
         mask_stepline1 = cv.inRange(rectangle, lower_stepline1, upper_stepline1)
         mask_stepline2 = cv.inRange(rectangle, lower_stepline2, upper_stepline2)
@@ -743,16 +759,22 @@ class CameraProcess:
             masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
             masked_right = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
 
+
+
         
 		# Combine masked images
+    
         masked_frame = masked_left + masked_right
 
+
+
         if self.sim:
+            stepline_contour, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
             masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
         else:
+            stepline_contour, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
             masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_right)
 
-        stepline_contour, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         
         if len(stepline_contour) > 0:
             largest_contour = max(stepline_contour, key=cv.contourArea)
@@ -784,8 +806,12 @@ class CameraProcess:
                 self.detect_stepline = False
 
 
-        contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-        contours_right, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        if self.sim:
+            contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+            contours_right, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        else:
+            contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+            contours_right, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
 
         left_lane, right_lane = None,None
         # Find the largest contour based on area
@@ -831,9 +857,11 @@ class CameraProcess:
             cv.circle(self.image, center_right, radius, color2, thickness)
         # cv.circle(self.image, center_road, radius, color2, 5)
 
+
         image_message = self.bridge.cv2_to_imgmsg(self.image, "passthrough")
         self.image_pub.publish(image_message)
 
+        
 
 
 if __name__ == "__main__":

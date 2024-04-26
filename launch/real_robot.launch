@@ -3,6 +3,19 @@
 
 <node name="lidar_process" pkg="projet" type="lidar_process.py"/>
 
+<rosparam command="load" file="$(find projet)/calib/real_colours.yaml" />
+
+<node pkg="image_proc" type="image_proc" name="image_proc" output="screen">
+    <remap from="image_raw" to="/camera/image"/>
+    <remap from="camera_info" to="/raspicam_node/camera_info"/>
+</node>
+
+<node pkg="image_transport" type="republish" name="image_republish" args="compressed" output="screen">
+    <remap from="in" to="/raspicam_node/image"/>
+    <remap from="out" to="/camera/image"/>
+</node>
+
+
 <!-- <node name="camera_info" pkg="projet" type="camera_calib.py"/>
 
 <param name="camera_calib" value="$(find projet)/calib/raspicam.yaml" />

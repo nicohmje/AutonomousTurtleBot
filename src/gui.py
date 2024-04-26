@@ -23,7 +23,10 @@ class ParameterSetterGUI:
             'stepline2': [(0, 180), (0, 255), (0, 255), (0, 180), (0, 255), (0, 255)]
         }
 
-        self.sim = rospy.get_param("use_sim_time")
+        try:
+            self.sim = rospy.get_param("use_sim_time")
+        except:
+            self.sim = False
 
         self.default_values = {
             'left_H_l': rospy.get_param("/left_H_l"),

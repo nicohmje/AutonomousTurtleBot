@@ -148,13 +148,7 @@
           <far>100</far>
         </clip>
         <lens>
-          <type>custom</type>
-          <custom_function>
-            <c1>1.05</c1>
-            <c2>4</c2>
-            <f>1.0</f>
-            <fun>tan</fun>
-          </custom_function>
+          <type>gnomonical</type>
           <scale_to_hfov>true</scale_to_hfov>
           <cutoff_angle>3.1415</cutoff_angle>
           <env_texture_size>512</env_texture_size>
