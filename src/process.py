@@ -4,6 +4,7 @@
 import rospy
 import numpy as np
 import cv2 as cv
+from scipy import signal
 from cv_bridge import CvBridge, CvBridgeError
 
 
@@ -25,6 +26,8 @@ class CameraProcess:
             self.image_pub = rospy.Publisher("/masked_frame", Image, queue_size=1)
             self.error_pub = rospy.Publisher("/error", Int32, queue_size=1)
             self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+            self.occupancy_grid_pub = rospy.Publisher('occupancy_grid_road', OccupancyGrid, queue_size=4)
+
 
 
             rospy.Subscriber("/param_change_alert", Bool, self.get_params)
@@ -44,15 +47,19 @@ class CameraProcess:
 
             self.occupancy_grid = None
 
-            self.left_lane = None
+            self.left_lane = [np.nan, np.nan]  
+            self.right_lane = [np.nan, np.nan]
+
 
             self.LOOKAHEAD = 1 #meters
-            self.CELLS_PER_METER = 25
+            self.CELLS_PER_METER = 50
             self.IS_FREE = 0
             self.IS_OCCUPIED = 100
 
 
             self.bridge = CvBridge()
+
+            self.last_detection = None
             self.get_params()
 
             rospy.Subscriber("/camera/image", Image, self.callback_image)
@@ -77,13 +84,12 @@ class CameraProcess:
         # self.cmd_speed = 0
         # self.ang_vel = 0
 
-        print("Step : ", self.step)
+        print("Step:", self.step)
         if not self.step:
             self.cmd_speed = 0.2
             self.ang_vel = 0
 
-        if self.step == 1:
-
+        if self.step <= 1:
             if self.cv_image is None:
                 rospy.logwarn("No image received!")
                 pass
@@ -115,7 +121,7 @@ class CameraProcess:
         # print(self.cmd_twist)
 
         #speed pub
-        #self.cmd_vel_pub.publish(self.cmd_twist)
+        # self.cmd_vel_pub.publish(self.cmd_twist)
 
 
 
@@ -146,8 +152,10 @@ class CameraProcess:
 
         print(dir)
 
+        dir = min(10, max(-10, dir))
+
         print("left ", dst_left)
-        print(dst_right)
+        print("right ", dst_right)
 
         self.ang_vel = dir
         self.cmd_speed = 0.1
@@ -242,35 +250,6 @@ class CameraProcess:
 
 
 
-    def crop_data(self, data:list, angle_increment) :
-
-        angle_min_crop = math.radians(self.min_angle_deg)
-        angle_max_crop = math.radians(self.max_angle_deg)
-
-
-        angle_min = -3.1415926535
-        angle_max = 3.1415926535
-        ranges = np.roll(np.array(data), int(len(data)/2)) #-pi/2 is first
-
-        # end_index = int(round((angle_max_crop*2) / angle_increment))
-
-        # cropped_ranges = ranges[:end_index]
-
-        # Calculate start and end indices for cropping
-        start_index = int((angle_min_crop - angle_min) / angle_increment)
-        end_index = int((angle_max_crop - angle_min) / angle_increment)
-
-        # Ensure indices are within the range of available data
-        start_index = max(0, min(start_index, len(ranges)))
-        end_index = max(0, min(end_index, len(ranges)))
-
-        # Crop the range data
-        cropped_ranges = ranges[start_index:end_index+1]
-
-        return list(cropped_ranges)
-
-
-
     def get_params(self, event=True):
         rospy.loginfo("Updating the parameters")
 
@@ -323,22 +302,6 @@ class CameraProcess:
         self.cv_image_rect = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         self.second_process(self.cv_image_rect)
 
-    # def local_to_grid(self, x, y):
-    #     i = int(x * -self.CELLS_PER_METER + (self.grid_height - 1))
-    #     j = int(y * -self.CELLS_PER_METER + self.CELL_Y_OFFSET)
-    #     return (i, j)
-
-    # def local_to_grid_parallel(self, x, y):
-    #     i = np.round(x * -self.CELLS_PER_METER + (self.grid_height - 1)).astype(int)
-    #     j = np.round(y * -self.CELLS_PER_METER + self.CELL_Y_OFFSET).astype(int)
-    #     return i, j
-
-    # def grid_to_local(self, point):
-    #     i, j = point[0], point[1]
-    #     x = (i - (self.grid_height - 1)) / -self.CELLS_PER_METER
-    #     y = (j - self.CELL_Y_OFFSET) / -self.CELLS_PER_METER
-    #     return (x, y)
-
 
     def obstacle_detection(self):
 
@@ -366,31 +329,29 @@ class CameraProcess:
 
     def lane_assist_controller(self):
 
-        if self.left_lane is None:
+        if self.left_lane is None or self.right_lane is None:
             return
-
+    
         rows, cols = self.image.shape[:2]
-
+        
         speed = 0.2
 
-        # print("left, right", self.left_lane, self.right_lane)
+        if self.step == 2:
+            speed = 0.1
 
+        print("left, right", self.left_lane, self.right_lane)
 
-        if self.left_lane[1]> 320:
+        if self.left_lane[1]> self.image.shape[1]//2:
             self.left_lane[1] = 0
-        if self.right_lane[1]<320:
-            self.right_lane[1] = 640
+        if self.right_lane[1]< self.image.shape[1]//2:
+            self.right_lane[1] = self.image.shape[1]
 
-        # if np.isnan(self.left_lane[1]) :
-            # print("left is nan")
+        print("left, right", self.left_lane, self.right_lane)
 
-
-        # if np.isnan(self.right_lane[1]):
-            # print("right is nan")
 
         if np.isnan(self.left_lane[1]):
             if np.isnan(self.right_lane[1]):
-                # print("left and right nan")
+                print("left and right nan")
                 center_of_road = self.image.shape[0]//2
                 speed = 0
             else:
@@ -403,52 +364,37 @@ class CameraProcess:
             else:
                 center_of_road = self.left_lane[1] + (self.right_lane[1] - self.left_lane[1])*0.5
 
-        # print("width ", self.right_lane[1] - self.left_lane[1])
+        print("width ", self.right_lane[1] - self.left_lane[1], "\n")
 
-        if (self.right_lane[1] - self.left_lane[1]) > 550:
+        max_width = (550, 240)[self.sim]
+        offset = (0.45, 0.3)[self.sim]
+
+        if (self.right_lane[1] - self.left_lane[1]) > max_width:
             print("Road split detected, following yellow line.")
-            print("left lane, cols", self.left_lane[1], cols*0.45)
-            center_of_road = self.left_lane[1] + (cols * 0.45)
+            print("left lane, cols", self.left_lane[1], cols*offset)
+            center_of_road = self.left_lane[1] + (cols * offset)
 
 
         self.error = center_of_road - self.image.shape[1]//2
 
-        # print("error", self.error)
+        self.error = max(min(10, self.error),-10)
+
+        print("error", self.error)
 
         # print("img shape", self.image.shape)
 
-        # print("center of road", center_of_road)
+        print("center of road", center_of_road)
 
         try:
             self.error_pub.publish(Int32(int(self.error)))
         except:
             self.error_pub.publish(Int32(0))
 
-        center_left = tuple(np.intp(self.left_lane))  # Convert centroid to integer tuple
-        center_left = tuple([center_left[1], center_left[0]])
-        center_right = tuple(np.intp(self.right_lane))  # Convert centroid to integer tuple
-        center_right = tuple([center_right[1], center_right[0]])
 
-
-        # center_road = tuple([int(center_of_road), 210])
-
-        # radius = 10  # Smaller radius for the circle we're drawing
-        # color = (0, 255, 0)  # Green color
-        # color2 = (255, 255, 0)  # Yellow color
-        # thickness = 2  # Thickness of the circle outline
-
-        # print("cetner road ", center_road)
-
-        # Draw the circle on the self.image
-        # cv.circle(self.image, center_left, radius, color, thickness)
-        # cv.circle(self.image, center_right, radius, color, thickness)
-        # cv.circle(self.image, center_road, radius, color2, 5)
-
-
-
+        Kp = -0.1
 
         self.cmd_speed =  speed #0.22
-        self.ang_vel = self.error * -0.025#0.03
+        self.ang_vel = self.error * Kp#0.03
 
     #Function that warps the image
     def warp(self, img, source_points, destination_points, destn_size):
@@ -466,33 +412,21 @@ class CameraProcess:
 
         hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
 
-        lower_yellow = np.array([77,0,94])
-        upper_yellow = np.array([102,97,190])
+        lower_yellow = np.array([self.left_H_l,self.left_S_l,self.left_V_l])
+        upper_yellow = np.array([self.left_H_u,self.left_S_u,self.left_V_u])
 
         # Define HSV thresholds for red color
-        lower_red1 = np.array([0, 0, 00])
-        upper_red1 = np.array([10, 255, 255])
-
-        lower_red2 = np.array([170, 50,131])
-        upper_red2 = np.array([180, 170, 222])
+        lower_right = np.array([self.right_H_l, self.right_S_l, self.right_V_l])
+        upper_right = np.array([self.right_H_u, self.right_S_u, self.right_V_u])
 
 
 
 		# Create masks for yellow and white colors
         mask_yellow = cv.inRange(hsv, lower_yellow, upper_yellow)
-        mask_red1 = cv.inRange(hsv, lower_red1, upper_red1)
-        mask_red2 = cv.inRange(hsv, lower_red2, upper_red2)
-        masked_red_inter = cv.bitwise_or(mask_red1, mask_red2, mask=mask_red2)
+        mask_right = cv.inRange(hsv, lower_right, upper_right)
 
 
-		# Bitwise AND masks with original image
-
-
-        # masked_yellow = cv.bitwise_and(hsv, hsv, mask=mask_yellow)
-        # masked_white = cv.bitwise_and(hsv, hsv, mask=masked_red_inter)
-
-		# Combine masked images
-        masked_frame = mask_yellow + masked_red_inter
+        masked_frame = mask_yellow + mask_right
 
         return masked_frame
 
@@ -558,8 +492,11 @@ class CameraProcess:
         lefty = y[left_lane_indices]
         rightx = x[right_lane_indices]
         righty = y[right_lane_indices]
-        left_fit = np.polyfit(lefty, leftx, 2)
-        right_fit = np.polyfit(righty, rightx, 2)
+        try:
+            left_fit = np.polyfit(lefty, leftx, 2)
+            right_fit = np.polyfit(righty, rightx, 2)
+        except:
+            return None, None
 
         return left_fit, right_fit
 
@@ -573,10 +510,10 @@ class CameraProcess:
         return pts_left, pts_right
 
     #Function that fills the space between the detected lane curves
-    def fillCurves(self,img_shape, pts_left, pts_right):
+    def fillCurves(self, img_shape, pts_left, pts_right):
         pts = np.hstack((pts_left, pts_right))
         img = np.zeros((img_shape[0], img_shape[1], 3), dtype='uint8')
-        cv.fillPoly(img, np.int_([pts]), (0,255, 0))
+        cv.fillPoly(img, np.int_([pts]), (255,0,255))
         return img
 
     def radiusOfCurvature(self,img, left_fit, right_fit):
@@ -598,51 +535,65 @@ class CameraProcess:
         height, width = processed_img.shape
 
         # polygon = [(int(width*0.05), int(height)), (int(width*0.3), int(height*0.7)), (int(width*0.7), int(height*0.7)), (int(0.95*width), int(height))]
-        polygon = [(int(0), int(height)), (int(1), int(158)), (int(width-1), int(158)), (int(width), int(height))]
-        masked_img = self.regionOfInterest(processed_img, polygon)
+        # polygon = [(int(0), int(height)), (int(1), int(130)), (int(width-1), int(130)), (int(width), int(height))]
+        # masked_img = self.regionOfInterest(processed_img, polygon)
 
+        if self.sim:
+            source_points = np.float32([[101,140], [width-101,140], [-200,height], [width+200,height]])
+            destination_points = np.float32([[0,0], [800,0], [0,450],[800, 450]])
+        else:
+            source_points = np.float32([[0,0], [width,0], [-850,height], [width+850,height]])
+            destination_points = np.float32([[0,0], [500,0], [0,600],[500, 600]])
 
-        source_points = np.float32([[0,0], [width,0], [-850,height], [width+850,height]])
-
-        destination_points = np.float32([[0,0], [500,0], [0,600],[500, 600]])
-        warped_img_size = (500, 600)
+        warped_img_size = (800, 450)
         warped_img = self.warp(processed_img, source_points, destination_points, warped_img_size)
-        kernel = np.ones((11,11), np.uint8)
+        
+    
+        kernel = np.ones((41,41), np.uint8)
         opening = cv.morphologyEx(warped_img, cv.MORPH_CLOSE, kernel)
 
         warped_img_shape = (warped_img.shape)
 
         left_fit, right_fit = self.fitCurve(opening)
+        if left_fit is None or right_fit is None:
+            return
         pts_left, pts_right = self.findPoints(warped_img_shape, left_fit, right_fit)
         fill_curves = self.fillCurves(warped_img_shape, pts_left, pts_right)
 
-
-        # self.combine_vision_and_lidar(fill_curves)
-        center_point = pts_left[0][-1] + (pts_right[0][-1] - pts_left[0][0])*0.5
-        waypoint = pts_left[0][0] + (pts_right[0][0] - pts_left[0][-1])*0.5
-
-        self.heading_error = waypoint - warped_img.shape[1]//2
-        self.crosstrack_error = center_point - warped_img.shape[1]//2
-
-        center_point = tuple(np.intp(center_point))
-        waypoint = tuple(np.intp(waypoint))
-
-        radius = 10  # Smaller radius for the circle we're drawing
-        color = (0, 0, 255)  # Green color
-        color2 = (255, 0, 0)  # Green color
-        thickness = 2  # Thickness of the circle outline
-
-        # Draw the circle on the imageq
-        cv.circle(fill_curves, center_point, radius, color, thickness)
-        cv.circle(fill_curves, waypoint, 2, color2, 50)
-
-
-        # print(fill_curves.shape)
-
         unwarped_fill_curves = self.unwarp(fill_curves, source_points, destination_points, (width, height))
         window1 = cv.addWeighted(image, 1, unwarped_fill_curves, 1, 0)
-        left_radius, right_radius, avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
 
+        road = self.warp(window1, source_points, destination_points, warped_img_size)
+
+
+        road_mask = cv.inRange(road, np.array([250,0,250]), np.array([255,20,255]))
+        road = cv.bitwise_and(road, road, mask=road_mask)
+
+        road = cv.GaussianBlur(road,(11,11),0)
+        road = cv.resize(road, (40,22))
+
+
+        last_row = road[-1,:,:]
+        tiled = np.tile(last_row[np.newaxis, :, :], (6,1,1))
+        road = np.vstack((road, tiled))
+
+    
+        road = cv.cvtColor(road, cv.COLOR_BGR2GRAY)
+        _,road = cv.threshold(road,40,255,cv.THRESH_BINARY)
+
+        kernel = np.ones(shape=[2, 2])
+
+
+
+        self.occupancy_grid2 = signal.convolve2d(
+            road.astype("int"), kernel.astype("int"), boundary="symm", mode="same"
+        )
+        self.occupancy_grid2 = np.clip(self.occupancy_grid2, 0, 50)
+
+        self.merge_occup_grids()
+
+
+        left_radius, right_radius, avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
 
 
         if abs(left_radius)>5000 and abs(right_radius)>5000:
@@ -655,10 +606,8 @@ class CameraProcess:
                 # print("Road is turning right ", avg_radius)
             else:
                 pass
-                # print("Road is turnign left ", avg_radius)
+                # print("Road is turning left ", avg_radius)
             # self.error = (5000. - avg_radius)/5000.
-
-
 
         # self.cmd_speed =  0.22 #0.22
         # self.ang_vel = (self.crosstrack_error[0] * -0.01) + self.heading_error[0] * -0.01
@@ -666,7 +615,47 @@ class CameraProcess:
         # print(self.ang_vel)
         # print("Heading error ", self.heading_error[0])
         # print("Crosstrack error ", self.crosstrack_error[0])
+        
         pass
+
+
+    def merge_occup_grids(self):
+        
+
+        print("shp", self.occupancy_grid2.shape)
+
+        lidar_occup = self.occupancy_grid
+
+        lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
+
+        if self.sim:
+            lidar_occup = lidar_occup[7:, 2:-8]
+        else:
+            rospy.logwarn("IMPLEMENT THIS")
+
+        self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
+
+        self.publish_occupancy_grid()
+
+
+
+
+
+    def publish_occupancy_grid(self):
+        """
+        Publish populated occupancy grid to ros2 topic
+        Args:
+            scan_msg (LaserScan): message from lidar scan topic
+        """
+        oc = OccupancyGrid()
+        oc.header.frame_id = "base_footprint"
+        oc.header.stamp = rospy.Time.now()
+        oc.info.origin.position.y -= (((self.occupancy_grid2.shape[1] / 2)) / self.CELLS_PER_METER) - 0.05
+        oc.info.width = self.occupancy_grid2.shape[0]
+        oc.info.height = self.occupancy_grid2.shape[1]
+        oc.info.resolution = 1 / self.CELLS_PER_METER
+        oc.data = np.fliplr(np.rot90(self.occupancy_grid2, k=1)).flatten().tolist()
+        self.occupancy_grid_pub.publish(oc)
         
     def undistort(self, img, balance=0.3, dim2=None, dim3=None):
         DIM = [320,240]
@@ -695,18 +684,20 @@ class CameraProcess:
 
         self.image = np.copy(image)
 
-        rectangle = np.copy(image)
+
+        # Convert image to HSV color space
+        hsv = cv.cvtColor(image, cv.COLOR_BGR2HSV)
+
+        rectangle = np.copy(hsv)
 
 
         if self.sim:
             rectangle[:150, :, :] = 0
-            rectangle[220:, :, :] = 0
+            # rectangle[220:, :, :] = 0
         else:
             rectangle[:, :40, :] = 0 
             rectangle[:, 280:, :] = 0
 
-        # Convert image to HSV color space
-        hsv = cv.cvtColor(image, cv.COLOR_BGR2HSV)
 
 
         # Left lane
@@ -725,11 +716,22 @@ class CameraProcess:
 
 
 		# Create masks for left, right and stepline colors
-        mask_left = cv.inRange(hsv, lower_left, upper_left)
-        mask_right = cv.inRange(hsv, lower_right, upper_right)
-        mask_stepline1 = cv.inRange(hsv, lower_stepline1, upper_stepline1)
-        mask_stepline2 = cv.inRange(hsv, lower_stepline2, upper_stepline2)
-        masked_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
+        mask_left = cv.inRange(rectangle, lower_left, upper_left)
+        mask_right = cv.inRange(rectangle, lower_right, upper_right)
+
+        kernel = np.ones((15,15), np.uint8)
+        mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel)
+        mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel)
+
+        if not self.sim:
+            rectangle[:350, : : ] = 0
+        else:
+            rectangle[:, :60, :] = 0
+            rectangle[:, 280:, :] = 0
+
+        mask_stepline1 = cv.inRange(rectangle, lower_stepline1, upper_stepline1)
+        mask_stepline2 = cv.inRange(rectangle, lower_stepline2, upper_stepline2)
+        mask_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
 
         # In the real world, the right lane is red, so we use the red color (with the two ranges). 
         # It's easier to just switch stepline and right than to change everything. 
@@ -739,45 +741,83 @@ class CameraProcess:
             masked_right = cv.bitwise_and(image, rectangle, mask=mask_right)
         else:
             masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
-            masked_right = cv.bitwise_and(image, rectangle, mask=masked_stepline_inter)
+            masked_right = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
 
         
 		# Combine masked images
         masked_frame = masked_left + masked_right
 
-        
-        if not self.sim:
-            rectangle[:350, : : ] = 0
-        else:
-            rectangle[:, :60, :] = 0
-            rectangle[:, 260:, :] = 0
-
-
         if self.sim:
-            masked_stepline = cv.bitwise_and(image, rectangle, mask=masked_stepline_inter)
+            masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
         else:
             masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_right)
 
+        stepline_contour, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        
+        if len(stepline_contour) > 0:
+            largest_contour = max(stepline_contour, key=cv.contourArea)
+            cv.drawContours(self.image, [largest_contour], -1, (0, 255, 0), 3)
 
-        if (np.argwhere(masked_stepline > 0).any()):
-            self.detect_stepline = True
+
+        area = 0
+        for i in stepline_contour:
+            stepline_area = cv.contourArea(i)
+            if stepline_area>area:
+                area = stepline_area
+        
+        stepline_area = area
+
+
+        # print("AREA STEPLINE  ", stepline_area)
+        if (stepline_area > 2400 and stepline_area < 3200):
+            
+            if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < 10):
+                print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
+                pass
+            else:
+                self.detect_stepline = True
         else:
             if self.detect_stepline:
-                print("STEP + 1")
+                print("STEP + 1, AREA: ", stepline_area)
                 self.step +=1
+                self.last_detection = rospy.Time.now()
                 self.detect_stepline = False
 
 
-        self.left_lane = np.mean(np.argwhere(masked_left > 0),axis = 0)[:2]
-        self.right_lane = np.mean(np.argwhere(masked_right > 0),axis = 0)[:2]
+        contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        contours_right, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
 
-        center_left = tuple(np.intp(self.left_lane))  # Convert centroid to integer tuple
-        center_left = tuple([center_left[1], center_left[0]])
-        center_right = tuple(np.intp(self.right_lane))  # Convert centroid to integer tuple
-        center_right = tuple([center_right[1], center_right[0]])
+        left_lane, right_lane = None,None
+        # Find the largest contour based on area
+        if len(contours_left)>0:
+            left_lane = max(contours_left, key=cv.contourArea)
+            cv.drawContours(self.image, [left_lane], -1, (0, 255, 0), 3)
+        if len(contours_right)>0:
+            right_lane = max(contours_right, key=cv.contourArea)
+            cv.drawContours(self.image, [right_lane], -1, (255, 255, 0), 3)
 
-        # center_road = tuple([int(center_of_road), 210])
 
+        # Calculate the centroid of the largest contour
+
+        if not self.left_lane is None:
+            M = cv.moments(left_lane)
+        if M["m00"] != 0:
+            self.left_lane[1] = int(M["m10"] / M["m00"])
+            self.left_lane[0] = int(M["m01"] / M["m00"])
+        else:
+            self.left_lane = [np.nan, np.nan]
+        # Calculate the centroid of the largest contour
+        if not self.right_lane is None:
+            M = cv.moments(right_lane)
+        if M["m00"] != 0:
+            self.right_lane[1] = int(M["m10"] / M["m00"])
+            self.right_lane[0] = int(M["m01"] / M["m00"])
+        else:
+            self.right_lane = [np.nan, np.nan]
+
+
+        center_left = tuple([self.left_lane[1], self.left_lane[0]])
+        center_right = tuple([self.right_lane[1], self.right_lane[0]])
 
         radius = 10 
         color = (0, 255, 0)  # Green 
@@ -785,11 +825,13 @@ class CameraProcess:
         thickness = 2 
 
         # Draw the circle on the self.image
-        cv.circle(self.image, center_left, radius, color, thickness)
-        cv.circle(self.image, center_right, radius, color2, thickness)
+        if not np.isnan(center_left[0]):
+            cv.circle(self.image, center_left, radius, color, thickness)
+        if not np.isnan(center_right[0]):
+            cv.circle(self.image, center_right, radius, color2, thickness)
         # cv.circle(self.image, center_road, radius, color2, 5)
 
-        image_message = self.bridge.cv2_to_imgmsg(rectangle, "passthrough")
+        image_message = self.bridge.cv2_to_imgmsg(self.image, "passthrough")
         self.image_pub.publish(image_message)
 
 

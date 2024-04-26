@@ -4,7 +4,7 @@
 
 <rosparam command="load" file="$(find projet)/calib/simu_colours.yaml" />
 
-<node name="process_image" pkg="projet" type="process.py"/>
+<!-- <node name="process_image" pkg="projet" type="process.py"/> -->
 
 
 <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find projet/rviz/turtlebot.rviz"/> -->

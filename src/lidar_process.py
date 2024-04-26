@@ -56,8 +56,8 @@ class LidarProcess:
 
 
         #occupancy grid:
-        self.LOOKAHEAD = 1.5 #meters
-        self.CELLS_PER_METER = 25
+        self.LOOKAHEAD = 0.6 #meters
+        self.CELLS_PER_METER = 50
         self.IS_FREE = 0
         self.IS_OCCUPIED = 100
         self.grid_height = int(self.LOOKAHEAD * self.CELLS_PER_METER)
@@ -90,6 +90,7 @@ class LidarProcess:
         indexes_j = j[occupied_indices]
 
         self.occupancy_grid[indexes_i,indexes_j] = self.IS_OCCUPIED
+        
 
 
         kernel = np.ones(shape=[2, 2])

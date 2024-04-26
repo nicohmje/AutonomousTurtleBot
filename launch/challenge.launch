@@ -15,7 +15,7 @@
 
 <param name="robot_description" command="$(find xacro)/xacro $(find projet)/urdf/turtlebot3.urdf.xacro " />
 
-<node pkg="gazebo_ros" type="spawn_model" name="spawn_urdf" args="-urdf -model turtlebot3_burger -x 0.87 -y -1.74 -z 0.0 -Y 0 -param robot_description" />
+<!-- <node pkg="gazebo_ros" type="spawn_model" name="spawn_urdf" args="-urdf -model turtlebot3_burger -x 0.87 -y -1.74 -z 0.0 -Y 0 -param robot_description" /> -->
 
 
 
@@ -24,7 +24,7 @@
 
 
 <node name="lidar_process" pkg="projet" type="lidar_process.py"/>
-<!-- 
+
 <node name="camera_info" pkg="projet" type="camera_calib.py"/>
 
 <param name="camera_calib" value="$(find projet)/calib/raspicam.yaml" />
@@ -33,7 +33,7 @@
     <remap from="image_raw" to="camera/image"/>
     <remap from="camera_info" to="camera/camera_info_correct"/>
     
-  </node> -->
+  </node>
 
 
 <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find projet/rviz/turtlebot.rviz"/> -->

@@ -148,7 +148,7 @@
           <far>100</far>
         </clip>
         <lens>
-          <type>custom</type>
+          <type>gnomonical</type>
           <scale_to_hfov>true</scale_to_hfov>
           <cutoff_angle>3.1415</cutoff_angle>
           <env_texture_size>512</env_texture_size>
