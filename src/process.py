@@ -14,7 +14,7 @@ from std_msgs.msg import Bool
 import matplotlib.pyplot as plt
 from std_msgs.msg import Int32
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 
 
 import math
@@ -27,16 +27,15 @@ class CameraProcess:
             self.error_pub = rospy.Publisher("/error", Int32, queue_size=1)
             self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
             self.occupancy_grid_pub = rospy.Publisher('occupancy_grid_road', OccupancyGrid, queue_size=4)
-
+            
 
 
             rospy.Subscriber("/param_change_alert", Bool, self.get_params)
 
-            self.cv_image = None
             self.laser_scan = None
 
             self.detect_stepline = False
-            self.step = 1
+            self.step = 0
 
             self.ang_vel = 0
             self.cmd_speed = 0
@@ -56,6 +55,11 @@ class CameraProcess:
             self.IS_FREE = 0
             self.IS_OCCUPIED = 100
 
+            self.current_index = 0
+
+            self.cv_image = None
+            self.cv_image_rect = None
+
 
             self.bridge = CvBridge()
 
@@ -66,7 +70,11 @@ class CameraProcess:
             rospy.Subscriber("/occupancy_grid_noroad", OccupancyGrid, self.occupCB)
             rospy.Subscriber("/lidar_data", LaserScan, self.lidarCB)
             rospy.Subscriber("/image_rect_color", Image, self.callback_image_rect)
+            rospy.Subscriber("/odom", Odometry, self.odomCB)
 
+
+    def odomCB(self, msg:Odometry):
+        pass
 
 
 
@@ -112,12 +120,21 @@ class CameraProcess:
             else:
                 self.lidar_only()
                 pass
-        else:
+
+        elif self.step == 4:
             self.lane_assist_controller()
 
+        elif self.step == 5:
+            if self.cv_image_rect is None:
+                print("NO IAMGE RECT")
+            else:
+                self.last_challenge()
 
         # print("ang_vel = ", self.ang_vel)
         self.cmd_twist.linear.x = self.cmd_speed
+
+        if self.sim:
+            self.ang_vel = min(0.9, max(-0.9, self.ang_vel))
         self.cmd_twist.angular.z = self.ang_vel
 
         # print(self.cmd_twist)
@@ -126,9 +143,9 @@ class CameraProcess:
         self.cmd_vel_pub.publish(self.cmd_twist)
 
 
-
     def lidarCB(self, data:LaserScan) :
         self.laser_scan = data
+
 
     def lidar_only(self):
         # center_pos_index = int(len(self.laser_scan.ranges)//2 + 1)
@@ -137,7 +154,8 @@ class CameraProcess:
 
         # offset = 75
 
-        Kp = 4.0
+        
+        Kp = (4.0, -0.05)[self.sim]
 
         # print(90 - np.argmax(self.laser_scan.ranges))
 
@@ -163,9 +181,6 @@ class CameraProcess:
         if abs(dir) > 0.1:
             self.ang_vel = dir
         self.cmd_speed = 0.1
-
-
-
 
 
     def traverse_grid(self, start, end):
@@ -215,7 +230,6 @@ class CameraProcess:
         return points
     
     
-
     def check_collision(self, cell_a, cell_b, margin=0):
         """
         Checks whether the path between two cells
@@ -251,7 +265,6 @@ class CameraProcess:
                     obstacles.append(cell)
                     break
         return obstacles
-
 
 
     def get_params(self, event=True):
@@ -300,6 +313,34 @@ class CameraProcess:
 
 
 
+        #Blue Color Gains
+        self.blue_H_l = rospy.get_param("/blue_H_l", default=77)
+        self.blue_S_l = rospy.get_param("/blue_S_l", default=32)
+        self.blue_V_l = rospy.get_param("/blue_V_l", default=76)
+
+        self.blue_H_u = rospy.get_param("/blue_H_u", default=102)
+        self.blue_S_u = rospy.get_param("/blue_S_u", default=180)
+        self.blue_V_u = rospy.get_param("/blue_V_u", default=132)
+
+        # Yellow Color Gains
+        self.yellow_H_l = rospy.get_param("/yellow_H_l", default=100)
+        self.yellow_S_l = rospy.get_param("/yellow_S_l", default=74)
+        self.yellow_V_l = rospy.get_param("/yellow_V_l", default=123)
+
+        self.yellow_H_u = rospy.get_param("/yellow_H_u", default=120)
+        self.yellow_S_u = rospy.get_param("/yellow_S_u", default=255)
+        self.yellow_V_u = rospy.get_param("/yellow_V_u", default=255)
+
+        # Green Color Gains
+        self.green_H_l = rospy.get_param("/green_H_l", default=100)
+        self.green_S_l = rospy.get_param("/green_S_l", default=74)
+        self.green_V_l = rospy.get_param("/green_V_l", default=123)
+
+        self.green_H_u = rospy.get_param("/green_H_u", default=120)
+        self.green_S_u = rospy.get_param("/green_S_u", default=255)
+        self.green_V_u = rospy.get_param("/green_V_u", default=255)
+
+
     def callback_image(self, msg):
         self.cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         self.process_image(self.cv_image)
@@ -334,8 +375,6 @@ class CameraProcess:
             self.ang_vel = error[0] * 2.0
 
 
-
-
     def lane_assist_controller(self):
 
         if self.left_lane is None or self.right_lane is None:
@@ -345,8 +384,8 @@ class CameraProcess:
         
         speed = 0.2
 
-        if self.step == 2:
-            speed = 0.2
+        if self.step == 2 and self.sim:
+            speed = 0.1
 
         print("left, right", self.left_lane, self.right_lane)
 
@@ -400,7 +439,7 @@ class CameraProcess:
             self.error_pub.publish(Int32(0))
 
         if self.sim:
-            Kp = -0.1 #-0.2 in si,m
+            Kp = -0.05 #-0.2 in si,m
         else:
             Kp = -0.02
 
@@ -548,6 +587,7 @@ class CameraProcess:
         cv.fillPoly(img, np.int_([pts]), (255,0,255))
         return img
 
+
     def radiusOfCurvature(self,img, left_fit, right_fit):
         y_eval = img.shape[0]//2
         left_radius = -1 * ((1 + (2*left_fit[0]*y_eval + left_fit[1])**2)**1.5) / (2*left_fit[0])
@@ -555,10 +595,12 @@ class CameraProcess:
         avg_radius = (left_radius+right_radius)/2
         return round(left_radius,2), round(right_radius,2), round(avg_radius,2)
 
+
     def combine_vision_and_lidar(self, roadmap):
         occup_grid = self.occupancy_grid
 
         pass
+
 
     def second_process(self, image):
         processed_img = self.preprocessing(image)
@@ -675,9 +717,6 @@ class CameraProcess:
         self.publish_occupancy_grid()
 
 
-
-
-
     def publish_occupancy_grid(self):
         """
         Publish populated occupancy grid to ros2 topic
@@ -694,6 +733,7 @@ class CameraProcess:
         oc.data = np.fliplr(np.rot90(self.occupancy_grid2, k=1)).flatten().tolist()
         self.occupancy_grid_pub.publish(oc)
         
+
     def undistort(self, img, balance=0.3, dim2=None, dim3=None):
         DIM = [320,240]
         K = np.array([[95.06302, 0.04031, 159.22853],
@@ -716,190 +756,405 @@ class CameraProcess:
         return undistorted_img
 
 
-
     def process_image(self, image):
 
         self.image = np.copy(image)
 
+        if self.step <= 4:
+            # Convert image to HSV color space
+            hsv = cv.cvtColor(image, cv.COLOR_BGR2HSV)
 
-        # Convert image to HSV color space
-        hsv = cv.cvtColor(image, cv.COLOR_BGR2HSV)
-
-        rectangle = np.copy(hsv)
-
-
-        if self.sim:
-            rectangle[:150, :, :] = 0
-            # rectangle[220:, :, :] = 0
-        else:
-            pass
-            # rectangle[]
-            # rectangle[:, :40, :] = 0 
-            # rectangle[:, 280:, :] = 0
+            rectangle = np.copy(hsv)
 
 
-
-        # Left lane
-        lower_left = np.array([self.left_H_l, self.left_S_l, self.left_V_l])
-        upper_left = np.array([self.left_H_u, self.left_S_u, self.left_V_u])
-
-		# Right lane
-        lower_right = np.array([self.right_H_l, self.right_S_l, self.right_V_l])
-        upper_right = np.array([self.right_H_u, self.right_S_u, self.right_V_u])
-
-        # Step line
-        lower_stepline1 = np.array([self.stepline1_H_l, self.stepline1_S_l, self.stepline1_V_l])
-        upper_stepline1 = np.array([self.stepline1_H_u, self.stepline1_S_u, self.stepline1_V_u])
-        lower_stepline2 = np.array([self.stepline2_H_l, self.stepline2_S_l, self.stepline2_V_l])
-        upper_stepline2 = np.array([self.stepline2_H_u, self.stepline2_S_u, self.stepline2_V_u])
-
-
-		# Create masks for left, right and stepline colors
-        mask_left = cv.inRange(rectangle, lower_left, upper_left)
-        mask_right = cv.inRange(rectangle, lower_right, upper_right)
-
-
-
-        kernel = np.ones((15,15), np.uint8)
-        mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel)
-        mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel)
-
-        if not self.sim:
-            pass
-            # rectangle[:350, : : ] = 0
-        else:
-            pass
-            # rectangle[:, :60, :] = 0
-            # rectangle[:, 280:, :] = 0
-
-        mask_stepline1 = cv.inRange(rectangle, lower_stepline1, upper_stepline1)
-        mask_stepline2 = cv.inRange(rectangle, lower_stepline2, upper_stepline2)
-        mask_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
-
-        mask_stepline_inter = cv.morphologyEx(mask_stepline_inter, cv.MORPH_CLOSE, kernel)
-
-
-
-        # In the real world, the right lane is red, so we use the red color (with the two ranges). 
-        # It's easier to just switch stepline and right than to change everything. 
-
-        if self.sim:
-            masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
-            masked_right = cv.bitwise_and(image, rectangle, mask=mask_right)
-        else:
-            masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
-            masked_right = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
-
-
-
-        
-		# Combine masked images
-    
-        masked_frame = masked_left + masked_right
-
-
-
-        if self.sim:
-            stepline_contour, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-            masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
-        else:
-            stepline_contour, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-            masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_right)
-
-        
-        if len(stepline_contour) > 0:
-            largest_contour = max(stepline_contour, key=cv.contourArea)
-            cv.drawContours(self.image, [largest_contour], -1, (0, 255, 0), 3)
-
-
-        area = 0
-        for i in stepline_contour:
-            stepline_area = cv.contourArea(i)
-            if stepline_area>area:
-                area = stepline_area
-        
-        stepline_area = area
-
-
-        print("AREA STEPLINE  ", stepline_area)
-
-        lower = (15000,2400)[self.sim]
-        upper = (30000,3200)[self.sim]
-
-
-        if (stepline_area > lower and stepline_area < upper):
-            
-            if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < 10):
-                print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
-                pass
+            if self.sim:
+                rectangle[:150, :, :] = 0
+                # rectangle[220:, :, :] = 0
             else:
-                self.detect_stepline = True
+                pass
+                # rectangle[]
+                # rectangle[:, :40, :] = 0 
+                # rectangle[:, 280:, :] = 0
+
+
+
+            # Left lane
+            lower_left = np.array([self.left_H_l, self.left_S_l, self.left_V_l])
+            upper_left = np.array([self.left_H_u, self.left_S_u, self.left_V_u])
+
+            # Right lane
+            lower_right = np.array([self.right_H_l, self.right_S_l, self.right_V_l])
+            upper_right = np.array([self.right_H_u, self.right_S_u, self.right_V_u])
+
+            # Step line
+            lower_stepline1 = np.array([self.stepline1_H_l, self.stepline1_S_l, self.stepline1_V_l])
+            upper_stepline1 = np.array([self.stepline1_H_u, self.stepline1_S_u, self.stepline1_V_u])
+            lower_stepline2 = np.array([self.stepline2_H_l, self.stepline2_S_l, self.stepline2_V_l])
+            upper_stepline2 = np.array([self.stepline2_H_u, self.stepline2_S_u, self.stepline2_V_u])
+
+
+            # Create masks for left, right and stepline colors
+            mask_left = cv.inRange(rectangle, lower_left, upper_left)
+            mask_right = cv.inRange(rectangle, lower_right, upper_right)
+
+
+
+            kernel = np.ones((15,15), np.uint8)
+            mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel)
+            mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel)
+
+            if not self.sim:
+                pass
+                # rectangle[:350, : : ] = 0
+            else:
+                pass
+                # rectangle[:, :60, :] = 0
+                # rectangle[:, 280:, :] = 0
+
+            mask_stepline1 = cv.inRange(rectangle, lower_stepline1, upper_stepline1)
+            mask_stepline2 = cv.inRange(rectangle, lower_stepline2, upper_stepline2)
+            mask_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
+
+            mask_stepline_inter = cv.morphologyEx(mask_stepline_inter, cv.MORPH_CLOSE, kernel)
+
+
+
+            # In the real world, the right lane is red, so we use the red color (with the two ranges). 
+            # It's easier to just switch stepline and right than to change everything. 
+
+            if self.sim:
+                masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
+                masked_right = cv.bitwise_and(image, rectangle, mask=mask_right)
+            else:
+                masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
+                masked_right = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
+
+
+
+            
+            # Combine masked images
+        
+            masked_frame = masked_left + masked_right
+
+
+
+            if self.sim:
+                stepline_contour, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+                masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
+            else:
+                stepline_contour, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+                masked_stepline = cv.bitwise_and(image, rectangle, mask=mask_right)
+
+            
+            if len(stepline_contour) > 0:
+                largest_contour = max(stepline_contour, key=cv.contourArea)
+                cv.drawContours(self.image, [largest_contour], -1, (0, 255, 0), 3)
+
+
+            area = 0
+            for i in stepline_contour:
+                stepline_area = cv.contourArea(i)
+                if stepline_area>area:
+                    area = stepline_area
+            
+            stepline_area = area
+
+
+            print("AREA STEPLINE  ", stepline_area)
+
+            lower = (15000,2400)[self.sim]
+            upper = (30000,3200)[self.sim]
+
+
+            if (stepline_area > lower and stepline_area < upper):
+                
+                if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < 10):
+                    print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
+                    pass
+                else:
+                    self.detect_stepline = True
+            else:
+                if self.detect_stepline:
+                    print("STEP + 1, AREA: ", stepline_area)
+                    self.step +=1
+                    self.last_detection = rospy.Time.now()
+                    self.detect_stepline = False
+
+
+            if self.sim:
+                contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+                contours_right, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+            else:
+                contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+                contours_right, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+
+            left_lane, right_lane = None,None
+            # Find the largest contour based on area
+            if len(contours_left)>0:
+                left_lane = max(contours_left, key=cv.contourArea)
+                cv.drawContours(self.image, [left_lane], -1, (0, 255, 0), 3)
+            if len(contours_right)>0:
+                right_lane = max(contours_right, key=cv.contourArea)
+                cv.drawContours(self.image, [right_lane], -1, (255, 255, 0), 3)
+
+
+            # Calculate the centroid of the largest contour
+
+            if not self.left_lane is None:
+                M = cv.moments(left_lane)
+            if M["m00"] != 0:
+                self.left_lane[1] = int(M["m10"] / M["m00"])
+                self.left_lane[0] = int(M["m01"] / M["m00"])
+            else:
+                self.left_lane = [np.nan, np.nan]
+            # Calculate the centroid of the largest contour
+            if not self.right_lane is None:
+                M = cv.moments(right_lane)
+            if M["m00"] != 0:
+                self.right_lane[1] = int(M["m10"] / M["m00"])
+                self.right_lane[0] = int(M["m01"] / M["m00"])
+            else:
+                self.right_lane = [np.nan, np.nan]
+
+
+            center_left = tuple([self.left_lane[1], self.left_lane[0]])
+            center_right = tuple([self.right_lane[1], self.right_lane[0]])
+
+            radius = 10 
+            color = (0, 255, 0)  # Green 
+            color2 = (255, 255, 0) # Cyan
+            thickness = 2 
+
+            # Draw the circle on the self.image
+            if not np.isnan(center_left[0]):
+                cv.circle(self.image, center_left, radius, color, thickness)
+            if not np.isnan(center_right[0]):
+                cv.circle(self.image, center_right, radius, color2, thickness)
+            # cv.circle(self.image, center_road, radius, color2, 5)
+
+
+            image_message = self.bridge.cv2_to_imgmsg(mask_right, "passthrough")
+            self.image_pub.publish(image_message)
         else:
-            if self.detect_stepline:
-                print("STEP + 1, AREA: ", stepline_area)
-                self.step +=1
-                self.last_detection = rospy.Time.now()
-                self.detect_stepline = False
+            pass
+
+    def last_challenge(self):
+        self.image_rect = np.copy(self.cv_image_rect)
+
+        hsv = cv.cvtColor(self.cv_image_rect, cv.COLOR_BGR2HSV)
+
+        # Blue lane
+        BlueBottle_l = np.array([self.blue_H_l, self.blue_S_l, self.blue_V_l])
+        BlueBottle_u = np.array([self.blue_H_u, self.blue_S_u, self.blue_V_u])
+
+		# Green lane
+        GreenBottle_l = np.array([self.green_H_l, self.green_S_l, self.green_V_l])
+        GreenBottle_u = np.array([self.green_H_u, self.green_S_u, self.green_V_u])
+
+        # Yellow lane
+        yellowBottle_l = np.array([self.yellow_H_l, self.yellow_S_l, self.yellow_V_l])
+        yellowBottle_u = np.array([self.yellow_H_u, self.yellow_S_u, self.yellow_V_u])
+
+        mask_blue = cv.inRange(hsv, BlueBottle_l, BlueBottle_u)
+        mask_green = cv.inRange(hsv, GreenBottle_l, GreenBottle_u)
+        mask_yellow = cv.inRange(hsv, yellowBottle_l, yellowBottle_u)
+
+        contours_blue, _ = cv.findContours(mask_blue, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        contours_green, _ = cv.findContours(mask_green, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        contours_yellow, _ = cv.findContours(mask_yellow, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+
+        threshold = 5000
 
 
-        if self.sim:
-            contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-            contours_right, _ = cv.findContours(mask_right, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-        else:
-            contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-            contours_right, _ = cv.findContours(mask_stepline_inter, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        self.order = [0,1,2] #0 blue, 1 green, 2 yellow
 
-        left_lane, right_lane = None,None
-        # Find the largest contour based on area
-        if len(contours_left)>0:
-            left_lane = max(contours_left, key=cv.contourArea)
-            cv.drawContours(self.image, [left_lane], -1, (0, 255, 0), 3)
-        if len(contours_right)>0:
-            right_lane = max(contours_right, key=cv.contourArea)
-            cv.drawContours(self.image, [right_lane], -1, (255, 255, 0), 3)
+        yellow_bottles = []
+        green_bottles = []
+        blue_bottles = []
 
+        yellow_middle = None
+        blue_middle = None
+        green_middle = None
 
-        # Calculate the centroid of the largest contour
+        blue_x = 0
+        yellow_x = 0
+        green_x = 0
 
-        if not self.left_lane is None:
-            M = cv.moments(left_lane)
-        if M["m00"] != 0:
-            self.left_lane[1] = int(M["m10"] / M["m00"])
-            self.left_lane[0] = int(M["m01"] / M["m00"])
-        else:
-            self.left_lane = [np.nan, np.nan]
-        # Calculate the centroid of the largest contour
-        if not self.right_lane is None:
-            M = cv.moments(right_lane)
-        if M["m00"] != 0:
-            self.right_lane[1] = int(M["m10"] / M["m00"])
-            self.right_lane[0] = int(M["m01"] / M["m00"])
-        else:
-            self.right_lane = [np.nan, np.nan]
+        for i in contours_blue:
+            if cv.contourArea(i) > threshold:
+                print("contour blue area: ", cv.contourArea(i))
+                M = cv.moments(i)
+                if M["m00"] != 0:
+                    y = int(M["m10"] / M["m00"])
+                    x = int(M["m01"] / M["m00"])
+                    blue_bottles.append([x,y])
+            cv.drawContours(self.image_rect, [i], -1, (255, 0, 0), 3)
 
 
-        center_left = tuple([self.left_lane[1], self.left_lane[0]])
-        center_right = tuple([self.right_lane[1], self.right_lane[0]])
+
+        for i in contours_green:
+            if cv.contourArea(i) > threshold:
+                print("contour green area: ", cv.contourArea(i))
+                M = cv.moments(i)
+                if M["m00"] != 0:
+                    y = int(M["m10"] / M["m00"])
+                    x = int(M["m01"] / M["m00"])
+                    green_bottles.append([x,y])
+            cv.drawContours(self.image_rect, [i], -1, (0, 255, 0), 3)
+
+        for i in contours_yellow:
+            if cv.contourArea(i) > threshold:
+                
+                print("contour yellow area: ", cv.contourArea(i))
+                M = cv.moments(i)
+                if M["m00"] != 0:
+                    y = int(M["m10"] / M["m00"])
+                    x = int(M["m01"] / M["m00"])
+                    yellow_bottles.append([x,y])
+            cv.drawContours(self.image_rect, [i], -1, (0, 0, 255), 3)
+
+        self.cmd_speed = 0.05
+
+        print('len yellow', len(yellow_bottles))
+        if len(yellow_bottles) > 0:
+            if len(yellow_bottles) == 1:
+                if yellow_bottles[0][1] > 320:
+                    yellow_middle = 640
+                else:
+                    yellow_middle = 0
+            
+            elif len(yellow_bottles) == 2:
+                yellow_middle = int(abs(yellow_bottles[1][1] + 0.5*(yellow_bottles[0][1] - yellow_bottles[1][1])))
+                yellow_x = abs(yellow_bottles[1][0] + 0.5*(yellow_bottles[0][0] - yellow_bottles[1][0]))
+            print("yellow middle :", yellow_middle)
+            print("x, :", yellow_x)
+
+
+        print('len green', len(green_bottles))
+
+        if len(green_bottles) > 0:
+            if len(green_bottles) == 1:
+                if green_bottles[0][1] > 320:
+                    green_middle = 640
+                else:
+                    green_middle = 0
+
+            elif len(green_bottles) == 2:
+                green_middle = int(abs(green_bottles[1][1] + 0.5*(green_bottles[0][1] - green_bottles[1][1])))
+                green_x = abs(green_bottles[1][0] + 0.5*(green_bottles[0][0] - green_bottles[1][0]))
+            print("green middle :", green_middle)
+            print("yellow x, :", green_x)
+        
+        print('len blue', len(blue_bottles))
+
+        if len(blue_bottles) > 0:
+            if len(blue_bottles) == 1:
+                if blue_bottles[0][1] > 320:
+                    blue_middle = 640
+                else:
+                    blue_middle = 0
+            elif len(blue_bottles) == 2: 
+                blue_middle = int(abs(blue_bottles[1][1] + 0.5*(blue_bottles[0][1] - blue_bottles[1][1])))
+                blue_x = abs(blue_bottles[1][0] + 0.5*(blue_bottles[0][0] - blue_bottles[1][0]))
+            print("blue middle :", blue_middle)
+            print("blue x:", blue_x)
+
+
+        if yellow_middle is None and blue_middle is None and green_middle is None:
+            self.ang_vel = -1.0
+            self.cmd_speed = 0.1
+
+
 
         radius = 10 
         color = (0, 255, 0)  # Green 
-        color2 = (255, 255, 0) # Cyan
+        color3 = (255,0,0) #Blue
+        color2 = (0, 0, 255) #Red
         thickness = 2 
 
-        # Draw the circle on the self.image
-        if not np.isnan(center_left[0]):
-            cv.circle(self.image, center_left, radius, color, thickness)
-        if not np.isnan(center_right[0]):
-            cv.circle(self.image, center_right, radius, color2, thickness)
-        # cv.circle(self.image, center_road, radius, color2, 5)
+        
 
+        if not yellow_middle is None:
+            cv.circle(self.image_rect, [yellow_middle, yellow_bottles[0][0]], radius, color2, thickness)
+            yellow_error = yellow_middle - (self.image_rect.shape[1] *0.5)
+            print(self.image_rect.shape)
+            print(yellow_error)
 
-        image_message = self.bridge.cv2_to_imgmsg(self.image, "passthrough")
+        if not blue_middle is None:
+            cv.circle(self.image_rect, [blue_middle, blue_bottles[0][0]], radius, color3, thickness)
+            blue_error = blue_middle - (self.image_rect.shape[1] *0.5)
+            print(self.image_rect.shape)
+            print(blue_error)  
+
+        if not green_middle is None:
+            cv.circle(self.image_rect, [green_middle, green_bottles[0][0]], radius, color, thickness)
+            green_error = green_middle - (self.image_rect.shape[1] *0.5)
+            print(self.image_rect.shape)
+            print(green_error)  
+
+        #1 blue, 2 green, 3 yellow
+
+        print("current target", self.current_index, self.order[self.current_index])
+        if self.order[self.current_index] == 0:
+            if blue_x > 300:
+                self.current_index += 1
+            print("ORDER BLUE")
+            if blue_middle is None:
+                if not green_middle is None:
+                    print("1")
+                    self.cmd_speed = 0
+                    self.ang_vel = green_error * 0.05
+                if not yellow_middle is None:
+                    print("2")
+                    self.cmd_speed = 0
+                    self.ang_vel = yellow_error * 0.05
+            else:
+                print("3")
+                self.ang_vel = blue_error * -0.005
+        
+        elif self.order[self.current_index] == 1:
+            if green_x > 300:
+                self.current_index += 1
+            print("ORDER GREEN")
+            if green_middle is None:
+                if not blue_middle is None:
+                    print("4")
+                    self.cmd_speed = 0
+                    self.ang_vel = blue_error * 0.05
+                if not yellow_middle is None:
+                    print("5")
+                    self.cmd_speed = 0
+                    self.ang_vel = yellow_error * 0.05
+            else:
+                print("6")
+                self.ang_vel = green_error * -0.005
+
+        elif self.order[self.current_index] == 2:
+            if len(yellow_bottles) > 0:
+                print("I see a yellow bottle !")
+        
+            if yellow_x > 300:
+                self.current_index += 1
+            print("ORDER YELLOW")
+            if yellow_middle is None:
+                if not blue_middle is None:
+                    print("7")
+                    self.cmd_speed = 0
+                    self.ang_vel = blue_error * 0.05
+                elif not green_middle is None:
+                    print("8")
+                    self.cmd_speed = 0
+                    self.ang_vel = green_error * 0.05
+            else:
+                print("9")
+                self.ang_vel = yellow_error * -0.005
+        
+        
+
+        image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
         self.image_pub.publish(image_message)
 
-
-
-        
+        pass
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+
+<node name="colour_gui" pkg="projet" type="gui_2.py" cwd="node"/>
+
+</launch>

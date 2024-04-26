@@ -1,9 +1,9 @@
-left_H_l: 66
-left_H_u: 88
-left_S_l: 61
-left_S_u: 255
-left_V_l: 20
-left_V_u: 255
+left_H_l: 53
+left_H_u: 100
+left_S_l: 67
+left_S_u: 200
+left_V_l: 74
+left_V_u: 137
 right_H_l: 100
 right_H_u: 120
 right_S_l: 74

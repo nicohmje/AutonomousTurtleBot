@@ -4,6 +4,8 @@
 <node name="lidar_process" pkg="projet" type="lidar_process.py"/>
 
 <rosparam command="load" file="$(find projet)/calib/real_colours.yaml" />
+<rosparam command="load" file="$(find projet)/calib/last_colours.yaml" />
+
 
 <node pkg="image_proc" type="image_proc" name="image_proc" output="screen">
     <remap from="image_raw" to="/camera/image"/>
