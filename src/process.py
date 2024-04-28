@@ -3,8 +3,11 @@
 
 import rospy
 import numpy as np
+import math
 import cv2 as cv
 from scipy import signal
+from sklearn.cluster import DBSCAN
+
 from cv_bridge import CvBridge, CvBridgeError
 
 
@@ -17,7 +20,60 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 
 
+
+
 import math
+
+
+class Bottle:
+    def __init__(self, index, position=None, gate=None, color=None):
+        self.index = index
+        self.position = position
+        self.gate = gate
+        self.color = color
+
+    def get_position(self):
+        return self.position
+
+    def set_position(self, position:tuple):
+        self.position = position
+
+    def set_gate(self, gate:int):
+        self.gate = gate
+
+    def get_gate(self):
+        return self.gate
+    
+    def get_index(self):
+        return self.index
+    
+class Gate:
+    def __init__(self, center_position=None, bottle_index1=None, bottle_index2=None, color=None):
+        self.center_position = center_position
+        self.bottle_index1 = bottle_index1
+        self.bottle_index2 = bottle_index2
+
+        self.confirmed = False
+        self.color = color
+
+        print("New gate alert! :", self.bottle_index1,self.bottle_index2)
+
+    def confirm(self):
+        self.confirmed = True
+
+    def get_center_pos(self):
+        return self.center_position
+    
+
+    def update(self, bottles):
+        c1 = bottles[self.bottle_index1].get_position()
+        c2 = bottles[self.bottle_index2].get_position()
+
+        cX = int(np.mean([c1[0],c2[0]]))
+        cY = int(np.mean([c1[1],c2[1]]))
+
+        self.center_position= (cX, cY)
+        
 
 
 
@@ -35,7 +91,7 @@ class CameraProcess:
             self.laser_scan = None
 
             self.detect_stepline = False
-            self.step = 0
+            self.step = 5
 
             self.ang_vel = 0
             self.cmd_speed = 0
@@ -65,6 +121,16 @@ class CameraProcess:
 
             self.last_detection = None
             self.get_params()
+
+
+
+            self.bottles = []
+            self.gates = []
+            self.same_bottle_threshold = 3
+            self.confirmed = False
+
+
+        
 
             rospy.Subscriber("/camera/image", Image, self.callback_image)
             rospy.Subscriber("/occupancy_grid_noroad", OccupancyGrid, self.occupCB)
@@ -140,7 +206,7 @@ class CameraProcess:
         # print(self.cmd_twist)
 
         # speed pub
-        self.cmd_vel_pub.publish(self.cmd_twist)
+        # self.cmd_vel_pub.publish(self.cmd_twist)
 
 
     def lidarCB(self, data:LaserScan) :
@@ -657,9 +723,6 @@ class CameraProcess:
         _,road = cv.threshold(road,40,255,cv.THRESH_BINARY)
 
         kernel = np.ones(shape=[2, 2])
-
-
-
         self.occupancy_grid2 = signal.convolve2d(
             road.astype("int"), kernel.astype("int"), boundary="symm", mode="same"
         )
@@ -939,6 +1002,152 @@ class CameraProcess:
             pass
 
     def last_challenge(self):
+        if self.occupancy_grid is None:
+            return
+        
+
+        lidar_occup = np.copy(self.occupancy_grid.filled(0))
+        lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
+
+
+        self.occupancy_grid2 = np.zeros((lidar_occup.shape[0], lidar_occup.shape[1], 3), dtype=np.uint8)
+
+        self.occupancy_grid2 = cv.cvtColor(self.occupancy_grid2, cv.COLOR_BGR2GRAY)
+
+        OccuGrid2 = (np.argwhere(lidar_occup == 100))
+
+        clustering = DBSCAN(eps=3, min_samples=10).fit(OccuGrid2)
+        
+        labels = clustering.labels_
+        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        n_noise_ = list(labels).count(-1)
+
+        print("clusters ", n_clusters_)
+
+
+        unique_labels = set(labels)
+        core_samples_mask = np.zeros_like(labels, dtype=bool)
+        core_samples_mask[clustering.core_sample_indices_] = True
+
+        colors = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
+        for k, col in zip(unique_labels, colors):
+            if k == -1:
+                # Black used for noise.
+                col = [0, 0, 0, 1]
+
+            class_member_mask = labels == k
+
+            xy = OccuGrid2[class_member_mask & core_samples_mask]
+            if len(xy)>0:
+                x = int(np.mean(xy[:,0]))
+                y = int(np.mean(xy[:,1]))
+                matched = False
+                for i in self.bottles:
+                    x2, y2 = i.get_position()
+                    distance = math.sqrt((x2 - x)**2 + (y2 - y)**2)
+                    if abs(distance) < self.same_bottle_threshold:
+                        # print(f"matched with an existing bottle, distance: {distance}")
+                        i.set_position((x,y))
+                        if i.get_gate():
+                            self.gates[i.get_gate()].update(self.bottles)
+                        matched = True
+                        break
+                    else:
+                        continue
+                if not matched:
+                    print("new bottle discovered!")
+                    self.bottles.append(Bottle(len(self.bottles), position=(x,y)))
+                # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
+
+
+        potential_neighbors = {}
+        neighbors = []
+        res_neighbors = {}
+
+        target_distance = 26.5
+        tolerance = 3
+        if not self.confirmed:
+            for i in range(len(self.bottles)):
+                potential_neighbors[i] = []
+                for j in range(len(self.bottles)):
+                        if i==j:
+                            continue
+                        x1, y1 = self.bottles[i].get_position()
+                        x2, y2 = self.bottles[j].get_position()
+                        distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                        if abs(distance - target_distance) < tolerance:
+                            potential_neighbors[i].append(j)
+                            # print(distance)
+                            # print(i,j)
+                            
+            print("potential", potential_neighbors)
+
+            for i in potential_neighbors:
+                if len(potential_neighbors[i]) == 1:
+                    if len(potential_neighbors[potential_neighbors[i][0]]) == 1:
+                        if potential_neighbors[potential_neighbors[i][0]][0] == i:
+                            # print(f"Neighbors found: {i}, {potential_neighbors[i]}")
+                            if not any(i in gate for gate in neighbors):
+                                neighbors.append((i, potential_neighbors[i][0]))
+                    else: 
+                        try:
+                            res_neighbors[potential_neighbors[i][0]].append(i)
+                        except:
+                            res_neighbors[potential_neighbors[i][0]] = [i]
+
+            for i in res_neighbors:
+                if len(res_neighbors[i])==1:
+                    neighbors.append((i, res_neighbors[i][0]))
+                else:
+                    print(f"ambiguity for {i}")
+
+            print("neighbors:", neighbors)
+
+
+            for i in neighbors:
+
+                print((self.bottles[i[0]].get_gate(), (self.bottles[i[1]].get_gate())))
+                if self.bottles[i[0]].get_gate() is None or self.bottles[i[1]].get_gate() is None:
+                    pass
+                else:
+                    if self.bottles[i[0]].get_gate() == self.bottles[i[1]].get_gate():
+                        continue
+                c1 = self.bottles[i[0]].get_position()
+                c2 = self.bottles[i[1]].get_position()
+
+                cX = int(np.mean([c1[0],c2[0]]))
+                cY = int(np.mean([c1[1],c2[1]]))
+
+                # self.occupancy_grid2[cX,cY] = 127
+
+                self.bottles[i[0]].set_gate(len(self.gates))
+                self.bottles[i[1]].set_gate(len(self.gates))
+                
+                self.gates.append(Gate(center_position=(cX,cY), bottle_index1=self.bottles[i[0]].get_index(), bottle_index2=self.bottles[i[1]].get_index()))
+                # cv.circle(self.occupancy_grid2, [cX,cY], 2, (0,255,0), 3)
+
+        if n_clusters_ == 6 and len(neighbors) == 3 and not self.confirmed:
+            self.confirmed = True
+            print("found all gates!")
+            for i in self.gates:
+                i.confirm()
+
+        for i in self.bottles:
+            # print(i.get_gate())
+            self.occupancy_grid2[i.get_position()[0],i.get_position()[1]] = 100
+            # cv.circle(occu_grid35, [i.get_position()[0],i.get_position()[1]], 1, (0,255,0), 2)  
+
+        for i in self.gates:
+            self.occupancy_grid2[i.get_center_pos()[0], i.get_center_pos()[1]] = 127
+            # cv.circle(occu_grid35, [i.get_center_pos()[0], i.get_center_pos()[1]], 2,(0,0,255), 1)
+
+        print("nb bottles: ", len(self.bottles))
+        print("nb gates: ", len(self.gates))
+
+        self.publish_occupancy_grid()
+        pass
+
+    def last_challenge2(self):
         self.image_rect = np.copy(self.cv_image_rect)
 
         hsv = cv.cvtColor(self.cv_image_rect, cv.COLOR_BGR2HSV)
@@ -1150,6 +1359,10 @@ class CameraProcess:
                 self.ang_vel = yellow_error * -0.005
         
         
+        if not self.occupancy_grid is None:
+            np.save("occupgrid", self.occupancy_grid)
+
+
 
         image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
         self.image_pub.publish(image_message)
