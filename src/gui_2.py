@@ -77,10 +77,10 @@ class ParameterSetterGUI:
     def write_to_yaml(self):
         current_values = {param: slider.get() for param, slider in self.sliders.items()}
         if self.sim:
-            with open('../calib/last_simu_colours.yaml', 'w') as file:
+            with open('../calib/last_sim_colours.yaml', 'w') as file:
                 yaml.dump(current_values, file, default_flow_style=False)
         else:
-            with open('../calib/last_colours.yaml', 'w') as file:
+            with open('../calib/last_real_colours.yaml', 'w') as file:
                 yaml.dump(current_values, file, default_flow_style=False)
 
 if __name__ == "__main__":

@@ -4,9 +4,12 @@
 import rospy
 import numpy as np
 import math
+import random
 import cv2 as cv
 from scipy import signal
 from sklearn.cluster import DBSCAN
+from skimage.morphology import dilation, disk
+
 
 from cv_bridge import CvBridge, CvBridgeError
 
@@ -21,8 +24,208 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 
 
 
+class Nodes:
+    """Class to store the RRT graph"""
+    def __init__(self, x,y):
+        self.x = x
+        self.y = y
+        self.parent_x = []
+        self.parent_y = []
+    def get_pos(self):
+        return (self.x,self.y)
 
-import math
+
+class RRTPlanning:
+
+    def __init__(self, step):
+        self.img = None
+        self.stepSize= step
+        self.node_list = [0]
+
+
+    def set_image(self, img):
+        self.img = img
+        self.start = (99, img.shape[1]//2,)
+
+    def plan(self, end):
+        if self.img is None:
+            return [None]
+        self.node_list = [0]
+        self.end = end
+        return self.RRT()
+    
+    def traverse_grid(self, x1, y1, x2, y2):
+        """
+        Bresenham's line algorithm for fast voxel traversal
+
+        CREDIT TO: Rogue Basin
+        CODE TAKEN FROM: http://www.roguebasin.com/index.php/Bresenham%27s_Line_Algorithm
+        """
+        # Setup initial conditions
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Determine how steep the line is
+        is_steep = abs(dy) > abs(dx)
+
+        # Rotate line
+        if is_steep:
+            x1, y1 = y1, x1
+            x2, y2 = y2, x2
+
+        # Swap start and end points if necessary and store swap state
+        if x1 > x2:
+            x1, x2 = x2, x1
+            y1, y2 = y2, y1
+
+        # Recalculate differentials
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Calculate error
+        error = int(dx / 2.0)
+        ystep = 1 if y1 < y2 else -1
+
+        # Iterate over bounding box generating points between start and end
+        y = y1
+        points = []
+        for x in range(x1, x2 + 1):
+            coord = (y, x) if is_steep else (x, y)
+            points.append(coord)
+            error -= abs(dy)
+            if error < 0:
+                y += ystep
+                error += dx
+        return points
+    
+
+    def collision(self, x1, y1, x2, y2):
+        for cell in self.traverse_grid(x1, y1, x2, y2):
+            # print(cell, self.img[cell[0], cell[1]])
+            if self.img[cell[0], cell[1]] == 0:
+                return True
+        return False
+
+    # check the  collision with obstacle and trim
+    def check_collision(self, x1,y1,x2,y2):
+        _,theta = self.dist_and_angle(x2,y2,x1,y1)
+        x=int(x2 + self.stepSize*np.cos(theta))
+        y=int(y2 + self.stepSize*np.sin(theta))
+
+        hx,hy=self.img.shape
+        if y<0 or y>=hy or x<0 or x>=hx:
+            
+            directCon = False
+            nodeCon = False
+        else:
+            # check direct connection
+            if self.collision(x,y,self.end[0],self.end[1]):
+                directCon = False
+            else:
+
+                directCon=True
+
+            # check connection between two nodes
+            if self.collision(x,y,x2,y2):
+                nodeCon = False
+            else:
+                nodeCon = True
+
+        return(x,y,directCon,nodeCon)
+
+    # return dist and angle b/w new point and nearest node
+    def dist_and_angle(self, x1,y1,x2,y2):
+        dist = math.sqrt( ((x1-x2)**2)+((y1-y2)**2) )
+        angle = math.atan2(y2-y1, x2-x1)
+        return(dist,angle)
+
+    # return the neaerst node index
+    def nearest_node(self, x,y):
+        temp_dist=[]
+        for i in range(len(self.node_list)):
+            dist,_ = self.dist_and_angle(x,y,self.node_list[i].x,self.node_list[i].y)
+            temp_dist.append(dist)
+        return temp_dist.index(min(temp_dist))
+
+    # generate a random point in the image space
+    def rnd_point(self, h,l):
+        new_y = random.randint(0, h)
+        new_x = random.randint(0, l)
+        return (new_x,new_y)
+
+
+    def RRT(self):
+        h,l= self.img.shape # dim of the loaded image
+
+        if self.img[self.start[0], self.start[1]] == 0:
+            return [None, None]
+        
+        if self.img[self.end[0], self.end[1]] == 0:
+            return [None, None]
+
+        if not self.collision(self.start[0], self.start[1], self.end[0], self.end[1]):
+            print("No obstacles, go directly to waypoint")
+            return [self.start, self.end]
+               
+        self.node_list[0] = Nodes(self.start[0],self.start[1])
+        self.node_list[0].parent_x.append(self.start[0])
+        self.node_list[0].parent_y.append(self.start[1])
+
+        i=1
+        pathFound = False
+        while pathFound==False:
+            if i > 200:
+                rospy.logwarn("ABORTING, TOO LONG, GO FORWARDS")
+                return [None, None]
+            
+            nx,ny = self.rnd_point(h,l)
+            
+            nearest_ind = self.nearest_node(nx,ny)
+            nearest_x = self.node_list[nearest_ind].x
+            nearest_y = self.node_list[nearest_ind].y
+            
+            #check direct connection
+            tx,ty,directCon,nodeCon = self.check_collision(nx,ny,nearest_x,nearest_y)
+            # print("Check collision:",tx,ty,directCon,nodeCon)
+
+            
+            if directCon and nodeCon:
+                print("Node can connect directly with end")
+                self.node_list.append(i)
+                self.node_list[i] = Nodes(tx,ty)
+                self.node_list[i].parent_x = self.node_list[nearest_ind].parent_x.copy()
+                self.node_list[i].parent_y = self.node_list[nearest_ind].parent_y.copy()
+                self.node_list[i].parent_x.append(tx)
+                self.node_list[i].parent_y.append(ty)
+                checkpoints = []
+                for j in range(len(self.node_list[i].parent_x)):
+                    checkpoints.append((int(self.node_list[i].parent_x[j]),int(self.node_list[i].parent_y[j])))
+
+                break
+
+            elif nodeCon:
+                self.node_list.append(i)
+                self.node_list[i] = Nodes(tx,ty)
+                self.node_list[i].parent_x = self.node_list[nearest_ind].parent_x.copy()
+                self.node_list[i].parent_y = self.node_list[nearest_ind].parent_y.copy()
+                # print(i)
+                # print(self.node_list[nearest_ind].parent_y)
+                self.node_list[i].parent_x.append(tx)
+                self.node_list[i].parent_y.append(ty)
+                i=i+1
+                continue
+
+            else:
+                continue
+            
+        checkpoints = []
+        for i in self.node_list:
+            point = i.get_pos()
+
+            checkpoints.append(i.get_pos())
+        checkpoints.append(self.end)
+        return checkpoints
+
 
 
 class Bottle:
@@ -31,12 +234,20 @@ class Bottle:
         self.position = position
         self.gate = gate
         self.color = color
+        self.last_iter_update = 0
+        self.dx = 0
 
     def get_position(self):
-        return self.position
-
+        return (round(self.position[0]), round(self.position[1]))
+    
     def set_position(self, position:tuple):
         self.position = position
+
+    def set_color(self, color):
+        self.color = color
+
+    def get_color(self):
+        return self.color
 
     def set_gate(self, gate:int):
         self.gate = gate
@@ -46,12 +257,37 @@ class Bottle:
     
     def get_index(self):
         return self.index
-    
+            
+    def apply_transform(self, delta):
+        self.last_iter_update = 0
+        CPM = 50
+        self.dx = delta[0] * CPM
+        x = 100 -self.position[0]
+        y = 75 - self.position[1] 
+
+        
+        x_ = x * math.cos(delta[1]) - y * math.sin(delta[1])
+        y_ = x * math.sin(delta[1]) + y * math.cos(delta[1])
+
+        x_ = 100 - x_
+        y_ = 75 - y_
+
+        x_ += self.dx
+        self.set_position((x_, y_))
+        # print("old pos :", self.position)
+        # print("new pos :", self.position)
+        pass
+
+
+
 class Gate:
     def __init__(self, center_position=None, bottle_index1=None, bottle_index2=None, color=None):
         self.center_position = center_position
         self.bottle_index1 = bottle_index1
         self.bottle_index2 = bottle_index2
+
+        self.offset_point1 = None
+        self.offset_point2 = None
 
         self.confirmed = False
         self.color = color
@@ -64,20 +300,44 @@ class Gate:
     def get_center_pos(self):
         return self.center_position
     
+    def set_colour(self, color, bottles):
+        bottles[self.bottle_index1].set_color(color)
+        bottles[self.bottle_index2].set_color(color)
+
+        self.color = color
+    
+    def get_color(self):
+        return self.color
+    
+    def get_bottles_indices(self):
+        return self.bottle_index1, self.bottle_index2
+    
+
+    def get_offset_points(self):
+        return self.offset_point1, self.offset_point2
 
     def update(self, bottles):
         c1 = bottles[self.bottle_index1].get_position()
         c2 = bottles[self.bottle_index2].get_position()
 
-        cX = int(np.mean([c1[0],c2[0]]))
-        cY = int(np.mean([c1[1],c2[1]]))
+        vec = np.array(c1) - np.array(c2)
+        perp_vec = np.array([-vec[1], vec[0]])
+        unit_perp_vec = perp_vec / np.linalg.norm(perp_vec)
 
-        self.center_position= (cX, cY)
+        offset = 12
+
+        cX = round(np.mean([c1[0],c2[0]]))
+        cY = round(np.mean([c1[1],c2[1]]))
+
+        self.center_position = (cX, cY)
+
+        self.offset_point1 = np.array(self.center_position) + offset * unit_perp_vec
+        self.offset_point2 = np.array(self.center_position) - offset * unit_perp_vec
         
 
 
 
-class CameraProcess:
+class TurtleController:
     def __init__(self):
             self.image_pub = rospy.Publisher("/masked_frame", Image, queue_size=1)
             self.error_pub = rospy.Publisher("/error", Int32, queue_size=1)
@@ -89,6 +349,9 @@ class CameraProcess:
             rospy.Subscriber("/param_change_alert", Bool, self.get_params)
 
             self.laser_scan = None
+
+            self.theta = None
+            self.pos = None
 
             self.detect_stepline = False
             self.step = 5
@@ -123,11 +386,22 @@ class CameraProcess:
             self.get_params()
 
 
+            self.pathplanner = RRTPlanning(6)
+
+
 
             self.bottles = []
             self.gates = []
-            self.same_bottle_threshold = 3
+
+            self.color_to_gate = {0:None, 1:None, 2:None}
+
+            self.same_bottle_threshold = 7
             self.confirmed = False
+
+            self.found_colors = False
+
+            self.state = 0 #0 exploring, 1 transiting, 2 crossing 
+            self.target_gate = None
 
 
         
@@ -140,11 +414,33 @@ class CameraProcess:
 
 
     def odomCB(self, msg:Odometry):
+        # print("Odom CB")
+        w,x,y,z = msg.pose.pose.orientation.w, msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z 
+        self.old_theta = self.theta
+        self.old_pos = self.pos
+        self.theta = math.atan2(2*x*y + 2 * z * w, 1 - 2*y*y - 2*z*z)
+        self.pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+        dx, dy = self.old_pos[0]-self.pos[0], self.old_pos[1] - self.pos[1]
+        dtheta = self.old_theta - self.theta
+
+        distance = math.sqrt(dx**2 + dy**2)
+
+        # direction = round((math.atan2(dy, dx) - self.old_theta)/math.pi)
+
+        # distance *= (-1, 1, -1)[direction] 
+        # print("dist and dir ", distance, direction)
+
+        self.delta = (distance,  dtheta)
+        for i in self.bottles:
+            # print(i.get_position())
+            i.apply_transform(self.delta)    
         pass
 
 
 
     def occupCB(self, msg):
+        # print("OccupCB")
         data = np.asarray(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
         self.occupancy_grid = np.ma.array(data, mask=data==-1, fill_value=-1)
         self.grid_height = msg.info.width
@@ -152,13 +448,16 @@ class CameraProcess:
         self.grid_width = msg.info.height
         self.CELL_Y_OFFSET = (self.grid_width // 2) - 1
 
+        if self.step == 5:
+            self.last_challenge()
+
 
     def make_cmd(self):
         self.cmd_twist = Twist()
         # self.cmd_speed = 0
         # self.ang_vel = 0
 
-        print("Step:", self.step)
+        # print("Step:", self.step)
         if not self.step:
             self.cmd_speed = 0.2
             self.ang_vel = 0
@@ -194,7 +493,8 @@ class CameraProcess:
             if self.cv_image_rect is None:
                 print("NO IAMGE RECT")
             else:
-                self.last_challenge()
+                pass
+                # self.last_challenge()
 
         # print("ang_vel = ", self.ang_vel)
         self.cmd_twist.linear.x = self.cmd_speed
@@ -203,10 +503,10 @@ class CameraProcess:
             self.ang_vel = min(0.9, max(-0.9, self.ang_vel))
         self.cmd_twist.angular.z = self.ang_vel
 
-        # print(self.cmd_twist)
+        # print(self.cmd_speed)
 
         # speed pub
-        # self.cmd_vel_pub.publish(self.cmd_twist)
+        self.cmd_vel_pub.publish(self.cmd_twist)
 
 
     def lidarCB(self, data:LaserScan) :
@@ -771,13 +1071,14 @@ class CameraProcess:
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
 
         if self.sim:
-            lidar_occup = lidar_occup[7:, 2:-8]
+            pass
+            # lidar_occup = lidar_occup[7:, 2:-8]
         else:
             rospy.logwarn("IMPLEMENT THIS")
 
         self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
 
-        self.publish_occupancy_grid()
+        # self.publish_occupancy_grid()
 
 
     def publish_occupancy_grid(self):
@@ -789,7 +1090,7 @@ class CameraProcess:
         oc = OccupancyGrid()
         oc.header.frame_id = "base_footprint"
         oc.header.stamp = rospy.Time.now()
-        oc.info.origin.position.y -= (((self.occupancy_grid2.shape[1] / 2)) / self.CELLS_PER_METER) - 0.05
+        oc.info.origin.position.y -= (((self.occupancy_grid2.shape[1] / 2)) / self.CELLS_PER_METER)
         oc.info.width = self.occupancy_grid2.shape[0]
         oc.info.height = self.occupancy_grid2.shape[1]
         oc.info.resolution = 1 / self.CELLS_PER_METER
@@ -1015,49 +1316,51 @@ class CameraProcess:
         self.occupancy_grid2 = cv.cvtColor(self.occupancy_grid2, cv.COLOR_BGR2GRAY)
 
         OccuGrid2 = (np.argwhere(lidar_occup == 100))
+        n_clusters_ = 0
 
-        clustering = DBSCAN(eps=3, min_samples=10).fit(OccuGrid2)
-        
-        labels = clustering.labels_
-        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
-        n_noise_ = list(labels).count(-1)
+        if OccuGrid2.shape[0]: 
 
-        print("clusters ", n_clusters_)
+            clustering = DBSCAN(eps=3, min_samples=10).fit(OccuGrid2)
+            
+            labels = clustering.labels_
+            n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+
+            print("clusters ", n_clusters_)
 
 
-        unique_labels = set(labels)
-        core_samples_mask = np.zeros_like(labels, dtype=bool)
-        core_samples_mask[clustering.core_sample_indices_] = True
+            unique_labels = set(labels)
+            core_samples_mask = np.zeros_like(labels, dtype=bool)
+            core_samples_mask[clustering.core_sample_indices_] = True
 
-        colors = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
-        for k, col in zip(unique_labels, colors):
-            if k == -1:
-                # Black used for noise.
-                col = [0, 0, 0, 1]
+            colors = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
+            for k, col in zip(unique_labels, colors):
+                if k == -1:
+                    # Black used for noise.
+                    col = [0, 0, 0, 1]
 
-            class_member_mask = labels == k
+                class_member_mask = labels == k
 
-            xy = OccuGrid2[class_member_mask & core_samples_mask]
-            if len(xy)>0:
-                x = int(np.mean(xy[:,0]))
-                y = int(np.mean(xy[:,1]))
-                matched = False
-                for i in self.bottles:
-                    x2, y2 = i.get_position()
-                    distance = math.sqrt((x2 - x)**2 + (y2 - y)**2)
-                    if abs(distance) < self.same_bottle_threshold:
-                        # print(f"matched with an existing bottle, distance: {distance}")
-                        i.set_position((x,y))
-                        if i.get_gate():
-                            self.gates[i.get_gate()].update(self.bottles)
-                        matched = True
-                        break
-                    else:
-                        continue
-                if not matched:
-                    print("new bottle discovered!")
-                    self.bottles.append(Bottle(len(self.bottles), position=(x,y)))
-                # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
+                xy = OccuGrid2[class_member_mask & core_samples_mask]
+                if len(xy)>0:
+                    x = round(np.mean(xy[:,0]))
+                    y = round(np.mean(xy[:,1]))
+                    matched = False
+                    for i in self.bottles:
+                        x2, y2 = i.get_position()
+                        distance = math.sqrt((x2 - x)**2 + (y2 - y)**2)
+                        if abs(distance) < self.same_bottle_threshold:
+                            print(f"matched with an existing bottle, distance: {distance}, pos : {x,y}")
+                            i.set_position((x,y))
+                            if not i.get_gate() is None:
+                                self.gates[i.get_gate()].update(self.bottles)
+                            matched = True
+                            break
+                        else:
+                            continue
+                    if not matched and not self.confirmed:
+                        print("new bottle discovered!", (x,y))
+                        self.bottles.append(Bottle(len(self.bottles), position=(x,y)))
+                    # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
 
 
         potential_neighbors = {}
@@ -1115,42 +1418,79 @@ class CameraProcess:
                 c1 = self.bottles[i[0]].get_position()
                 c2 = self.bottles[i[1]].get_position()
 
-                cX = int(np.mean([c1[0],c2[0]]))
-                cY = int(np.mean([c1[1],c2[1]]))
+                cX = round(np.mean([c1[0],c2[0]]))
+                cY = round(np.mean([c1[1],c2[1]]))
 
                 # self.occupancy_grid2[cX,cY] = 127
 
                 self.bottles[i[0]].set_gate(len(self.gates))
                 self.bottles[i[1]].set_gate(len(self.gates))
-                
+
                 self.gates.append(Gate(center_position=(cX,cY), bottle_index1=self.bottles[i[0]].get_index(), bottle_index2=self.bottles[i[1]].get_index()))
                 # cv.circle(self.occupancy_grid2, [cX,cY], 2, (0,255,0), 3)
 
-        if n_clusters_ == 6 and len(neighbors) == 3 and not self.confirmed:
-            self.confirmed = True
-            print("found all gates!")
-            for i in self.gates:
-                i.confirm()
+        nb = {}
+
+        for g in range(0,len(self.gates)):
+            nb[g] = 0
+
 
         for i in self.bottles:
-            # print(i.get_gate())
-            self.occupancy_grid2[i.get_position()[0],i.get_position()[1]] = 100
+            # print(i.get_position())
+            if not i.get_gate() is None:
+                try:    
+                    nb[i.get_gate()] += 1
+
+                    if self.gates[i.get_gate()].get_color() == self.order[self.current_index]:
+                        print("Opened target gate")
+                    else:
+                        # self.occupancy_grid2[self.gates[i.get_gate()].get_center_pos()[0], self.gates[i.get_gate()].get_center_pos()[1]] = 127
+                        b1,b2 = self.gates[i.get_gate()].get_bottles_indices()
+                        cells = self.traverse_grid(self.bottles[b1].get_position(), self.bottles[b2].get_position())
+                        # print("CELLS ", cells)
+                        for c in cells:
+                            self.occupancy_grid2[c[0],c[1]] = 127
+                except:
+                    pass
+            try:
+                self.occupancy_grid2[i.get_position()[0],i.get_position()[1]] = 100
+            except:
+                pass
             # cv.circle(occu_grid35, [i.get_position()[0],i.get_position()[1]], 1, (0,255,0), 2)  
 
-        for i in self.gates:
-            self.occupancy_grid2[i.get_center_pos()[0], i.get_center_pos()[1]] = 127
-            # cv.circle(occu_grid35, [i.get_center_pos()[0], i.get_center_pos()[1]], 2,(0,0,255), 1)
+        self.active_gates = [key for key, value in nb.items() if value == 2]
 
+        # for i in self.active_gates:
+        #     p1, p2 = self.gates[i].get_offset_points()
+        #     if p1 is None or p2 is None:
+        #         continue
+        #     self.occupancy_grid2[round(p1[0]), round(p1[1])] = 66
+        #     self.occupancy_grid2[round(p2[0]), round(p2[1])] = 66
+
+        if len(self.active_gates) == 3 and not self.confirmed:
+            self.confirmed = True
+            rospy.logwarn("found all gates!")
+            for i in self.active_gates:
+                self.gates[i].confirm()
+
+        print("Active gates ", len(self.active_gates))
         print("nb bottles: ", len(self.bottles))
-        print("nb gates: ", len(self.gates))
 
-        self.publish_occupancy_grid()
+        self.merge_occup_grids()
+        self.last_challenge2()
         pass
 
     def last_challenge2(self):
+
+        goal_point = None
+
         self.image_rect = np.copy(self.cv_image_rect)
 
-        hsv = cv.cvtColor(self.cv_image_rect, cv.COLOR_BGR2HSV)
+
+        try:
+            hsv = cv.cvtColor(self.cv_image_rect, cv.COLOR_BGR2HSV)
+        except:
+            return
 
         # Blue lane
         BlueBottle_l = np.array([self.blue_H_l, self.blue_S_l, self.blue_V_l])
@@ -1160,224 +1500,308 @@ class CameraProcess:
         GreenBottle_l = np.array([self.green_H_l, self.green_S_l, self.green_V_l])
         GreenBottle_u = np.array([self.green_H_u, self.green_S_u, self.green_V_u])
 
-        # Yellow lane
+
         yellowBottle_l = np.array([self.yellow_H_l, self.yellow_S_l, self.yellow_V_l])
         yellowBottle_u = np.array([self.yellow_H_u, self.yellow_S_u, self.yellow_V_u])
+        mask_yellow = cv.inRange(hsv, yellowBottle_l, yellowBottle_u)
 
         mask_blue = cv.inRange(hsv, BlueBottle_l, BlueBottle_u)
         mask_green = cv.inRange(hsv, GreenBottle_l, GreenBottle_u)
-        mask_yellow = cv.inRange(hsv, yellowBottle_l, yellowBottle_u)
 
         contours_blue, _ = cv.findContours(mask_blue, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         contours_green, _ = cv.findContours(mask_green, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         contours_yellow, _ = cv.findContours(mask_yellow, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
 
-        threshold = 5000
+
+        threshold = (5000, 200)[self.sim]
 
 
-        self.order = [0,1,2] #0 blue, 1 green, 2 yellow
+        self.order = [2,0,1] #0 blue, 1 green, 2 yellow
 
         yellow_bottles = []
         green_bottles = []
         blue_bottles = []
 
-        yellow_middle = None
-        blue_middle = None
-        green_middle = None
-
-        blue_x = 0
-        yellow_x = 0
-        green_x = 0
-
         for i in contours_blue:
             if cv.contourArea(i) > threshold:
-                print("contour blue area: ", cv.contourArea(i))
+                # print("contour blue area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
                     x = int(M["m01"] / M["m00"])
-                    blue_bottles.append([x,y])
-            cv.drawContours(self.image_rect, [i], -1, (255, 0, 0), 3)
+                    blue_bottles.append([x,y, cv.contourArea(i)])
+                cv.drawContours(self.image_rect, [i], -1, (255, 20, 20), 3)
 
 
 
         for i in contours_green:
             if cv.contourArea(i) > threshold:
-                print("contour green area: ", cv.contourArea(i))
+                # print("contour green area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
                     x = int(M["m01"] / M["m00"])
-                    green_bottles.append([x,y])
-            cv.drawContours(self.image_rect, [i], -1, (0, 255, 0), 3)
+                    green_bottles.append([x,y, cv.contourArea(i)])
+                cv.drawContours(self.image_rect, [i], -1, (20, 255, 20), 3)
 
         for i in contours_yellow:
             if cv.contourArea(i) > threshold:
-                
-                print("contour yellow area: ", cv.contourArea(i))
+                # print("contour yellow area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
                     x = int(M["m01"] / M["m00"])
-                    yellow_bottles.append([x,y])
-            cv.drawContours(self.image_rect, [i], -1, (0, 0, 255), 3)
+                    yellow_bottles.append([x,y, cv.contourArea(i)])
+                cv.drawContours(self.image_rect, [i], -1, (20, 20, 255), 3)
 
-        self.cmd_speed = 0.05
+        #0 blue, 1 green, 2 yellow
+        gates = {0:[None, None], 1:[None, None], 2:[None, None]}
 
-        print('len yellow', len(yellow_bottles))
-        if len(yellow_bottles) > 0:
-            if len(yellow_bottles) == 1:
-                if yellow_bottles[0][1] > 320:
-                    yellow_middle = 640
+        if len(yellow_bottles) == 2:
+            avg_area_yellow = (yellow_bottles[0][2] + yellow_bottles[1][2]) * 0.5
+            center_yellow = (yellow_bottles[0][1] + 0.5*(yellow_bottles[1][1] - yellow_bottles[0][1]))
+
+            offcenter_yellow = center_yellow - (self.image_rect.shape[1] * 0.5)
+
+            gates[2] = [offcenter_yellow, avg_area_yellow]
+        
+        if len(blue_bottles) == 2:
+            avg_area_blue = (blue_bottles[0][2] + blue_bottles[1][2]) * 0.5
+            center_blue = (blue_bottles[0][1] + 0.5*(blue_bottles[1][1] - blue_bottles[0][1]))
+
+            offcenter_blue = center_blue - (self.image_rect.shape[1] * 0.5)
+
+            gates[0] = [offcenter_blue, avg_area_blue]
+        
+        if len(green_bottles) == 2:
+            avg_area_green = (green_bottles[0][2] + green_bottles[1][2]) * 0.5
+            center_green = (green_bottles[0][1] + 0.5*(green_bottles[1][1] - green_bottles[0][1]))
+
+            offcenter_green = center_green - (self.image_rect.shape[1] * 0.5)
+
+            gates[1] = [offcenter_green, avg_area_green]
+
+
+        possible_pairing = {0: [], 1: [], 2: []}
+
+        for i in self.active_gates:
+            if self.gates[i].get_color() is None:
+                center = self.gates[i].get_center_pos()
+                local_center = (self.occupancy_grid.shape[1] - center[0], center[1] - 0.5*self.occupancy_grid.shape[0])
+                angle = math.atan2(local_center[1], local_center[0])
+                distance = math.sqrt(local_center[0]**2 + local_center[1]**2)
+                # print("distna", distance)
+                if abs(angle) < 0.3 and distance < 45:
+                    for key, value in gates.items():
+                        if value[0] is None:
+                            continue
+                        else:
+                            if abs(value[0] - angle*10) < 30:
+                                possible_pairing[key].append(i)
+
+        for color, gate in possible_pairing.items():
+            if len(gate) == 1:
+                rospy.logwarn(f"FOUND COLOR FOR GATE {gate}, COLOR IS {color}")
+                self.gates[gate[0]].set_colour(color, self.bottles)
+
+        for gate in self.active_gates:
+            print(gate, self.gates[gate].get_color())
+
+
+
+
+        if self.state == 0:
+            colours = [0,1,2]
+            unassigned_gates = []
+
+            for i in self.active_gates:
+                if not self.gates[i].get_color() is None:
+                    colours.remove(self.gates[i].get_color())
                 else:
-                    yellow_middle = 0
-            
-            elif len(yellow_bottles) == 2:
-                yellow_middle = int(abs(yellow_bottles[1][1] + 0.5*(yellow_bottles[0][1] - yellow_bottles[1][1])))
-                yellow_x = abs(yellow_bottles[1][0] + 0.5*(yellow_bottles[0][0] - yellow_bottles[1][0]))
-            print("yellow middle :", yellow_middle)
-            print("x, :", yellow_x)
+                    unassigned_gates.append(i)
 
 
-        print('len green', len(green_bottles))
-
-        if len(green_bottles) > 0:
-            if len(green_bottles) == 1:
-                if green_bottles[0][1] > 320:
-                    green_middle = 640
-                else:
-                    green_middle = 0
-
-            elif len(green_bottles) == 2:
-                green_middle = int(abs(green_bottles[1][1] + 0.5*(green_bottles[0][1] - green_bottles[1][1])))
-                green_x = abs(green_bottles[1][0] + 0.5*(green_bottles[0][0] - green_bottles[1][0]))
-            print("green middle :", green_middle)
-            print("yellow x, :", green_x)
-        
-        print('len blue', len(blue_bottles))
-
-        if len(blue_bottles) > 0:
-            if len(blue_bottles) == 1:
-                if blue_bottles[0][1] > 320:
-                    blue_middle = 640
-                else:
-                    blue_middle = 0
-            elif len(blue_bottles) == 2: 
-                blue_middle = int(abs(blue_bottles[1][1] + 0.5*(blue_bottles[0][1] - blue_bottles[1][1])))
-                blue_x = abs(blue_bottles[1][0] + 0.5*(blue_bottles[0][0] - blue_bottles[1][0]))
-            print("blue middle :", blue_middle)
-            print("blue x:", blue_x)
+            # print("remaingin colours, unassigned_gates ", colours, unassigned_gates)
 
 
-        if yellow_middle is None and blue_middle is None and green_middle is None:
-            self.ang_vel = -1.0
-            self.cmd_speed = 0.1
+            if len(colours) == 1 and len(unassigned_gates) == 1:
+                rospy.logwarn(f"FOUND REMAINING COLOR FOR GATE {unassigned_gates[0]}, COLOR IS {colours[0]}")
+                self.gates[unassigned_gates[0]].set_colour(colours[0], self.bottles)
+            elif len(colours) == 1:
+                for i in self.bottles:
+                    if i.get_gate() is None:
+                        print(f"Go to this position {i.get_position()}")
+                        goal_point = np.array(i.get_position())
 
 
-
-        radius = 10 
-        color = (0, 255, 0)  # Green 
-        color3 = (255,0,0) #Blue
-        color2 = (0, 0, 255) #Red
-        thickness = 2 
-
-        
-
-        if not yellow_middle is None:
-            cv.circle(self.image_rect, [yellow_middle, yellow_bottles[0][0]], radius, color2, thickness)
-            yellow_error = yellow_middle - (self.image_rect.shape[1] *0.5)
-            print(self.image_rect.shape)
-            print(yellow_error)
-
-        if not blue_middle is None:
-            cv.circle(self.image_rect, [blue_middle, blue_bottles[0][0]], radius, color3, thickness)
-            blue_error = blue_middle - (self.image_rect.shape[1] *0.5)
-            print(self.image_rect.shape)
-            print(blue_error)  
-
-        if not green_middle is None:
-            cv.circle(self.image_rect, [green_middle, green_bottles[0][0]], radius, color, thickness)
-            green_error = green_middle - (self.image_rect.shape[1] *0.5)
-            print(self.image_rect.shape)
-            print(green_error)  
-
-        #1 blue, 2 green, 3 yellow
-
-        print("current target", self.current_index, self.order[self.current_index])
-        if self.order[self.current_index] == 0:
-            if blue_x > 300:
-                self.current_index += 1
-            print("ORDER BLUE")
-            if blue_middle is None:
-                if not green_middle is None:
-                    print("1")
-                    self.cmd_speed = 0
-                    self.ang_vel = green_error * 0.05
-                if not yellow_middle is None:
-                    print("2")
-                    self.cmd_speed = 0
-                    self.ang_vel = yellow_error * 0.05
+            points = []
+            distances = []
+            if len(colours) > 0:
+                print("Not found the one we want yet. We'll explore a bit.")
+                for i in self.active_gates:
+                    if self.gates[i].get_color() is None:
+                        if not self.gates[i].get_offset_points()[0] is None:
+                            point, dist = self.closest_point(self.gates[i].get_offset_points())
+                            points.append(point)
+                            distances.append(dist)
             else:
-                print("3")
-                self.ang_vel = blue_error * -0.005
-        
-        elif self.order[self.current_index] == 1:
-            if green_x > 300:
-                self.current_index += 1
-            print("ORDER GREEN")
-            if green_middle is None:
-                if not blue_middle is None:
-                    print("4")
-                    self.cmd_speed = 0
-                    self.ang_vel = blue_error * 0.05
-                if not yellow_middle is None:
-                    print("5")
-                    self.cmd_speed = 0
-                    self.ang_vel = yellow_error * 0.05
-            else:
-                print("6")
-                self.ang_vel = green_error * -0.005
+                for i in self.active_gates:
+                    if self.gates[i].get_color() == self.order[self.current_index]:
+                        print("GOING TO THE CORRECT ONE!")
+                        self.found_colors = True
+                        self.state = 1
+                        goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
+                        self.target_gate = i
 
-        elif self.order[self.current_index] == 2:
-            if len(yellow_bottles) > 0:
-                print("I see a yellow bottle !")
-        
-            if yellow_x > 300:
-                self.current_index += 1
-            print("ORDER YELLOW")
-            if yellow_middle is None:
-                if not blue_middle is None:
-                    print("7")
-                    self.cmd_speed = 0
-                    self.ang_vel = blue_error * 0.05
-                elif not green_middle is None:
-                    print("8")
-                    self.cmd_speed = 0
-                    self.ang_vel = green_error * 0.05
-            else:
-                print("9")
-                self.ang_vel = yellow_error * -0.005
-        
-        
-        if not self.occupancy_grid is None:
-            np.save("occupgrid", self.occupancy_grid)
+            if len(points)>0:
+                print("Closest point :" , points[np.argmin(distances)])
+                goal_point = points[np.argmin(distances)]
 
 
+        elif self.state == 1:
+            for i in self.active_gates:
+                    if self.gates[i].get_color() == self.order[self.current_index]:
+                        # print("GOING TO THE CORRECT ONE!")
+                        self.found_colors = True
+                        self.state = 1
+                        goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
+                        self.target_gate = i
+            goal_point = self.closest_point(self.gates[self.target_gate].get_offset_points())[0]
+        elif self.state == 2:
+            goal_point = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)[0]
+        # elif self.state == 1:
+        #     goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
+        # elif self.state == 2:
+        #     #Get opposite point
+        #     goal_point = self.closest_point(self.gates[i].get_offset_points(), closest=False)[0]
+
+        
+
+        if not goal_point is None:
+            self.path_planning(goal_point)
 
         image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
         self.image_pub.publish(image_message)
+        self.publish_occupancy_grid()
 
+
+    def closest_point(self, points, closest=True):
+        
+        point1 = points[0]
+        point2 = points[1]
+
+        # local_center = (self.occupancy_grid.shape[1] - center[0], center[1] - 0.5*self.occupancy_grid.shape[0])
+        p1 = (self.occupancy_grid.shape[1] - point1[0], point1[1] - 0.5*self.occupancy_grid.shape[0])
+        p2 = (self.occupancy_grid.shape[1] - point2[0], point2[1] - 0.5*self.occupancy_grid.shape[0])
+ 
+        d1 = math.sqrt(p1[0]**2 + p1[1]**2)
+        d2 = math.sqrt(p2[0]**2 + p2[1]**2)
+
+        if closest:
+            if d1 < d2:
+                return point1, d1
+            else:
+                return point2, d2
+        else:
+            if d1 > d2:
+                return point1, d1
+            else:
+                return point2, d2
+            
+            
+    def path_planning(self, goal):
+
+
+        goal = np.array(goal, dtype=np.int16)
+
+
+        self.cmd_speed = 0.15
+
+        if goal[0] >= 100:
+            goal[0] = 99
+        if goal[1] >= 150:
+            goal[1] = 149
+
+        print("GOAL", goal)
+
+
+        occu_grid_cp = (self.occupancy_grid2 > 95)
+
+        # Create a structuring element (disk) corresponding to half the robot's width
+        selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
+
+        # Dilate the obstacle map
+        inflated_obstacles = dilation(occu_grid_cp, selem)
+        inflated_obstacles = np.where(inflated_obstacles, 0, 100)
+
+        self.pathplanner.set_image(inflated_obstacles)
+
+        # self.occupancy_grid2 = inflated_obstacles
+
+        print("starting path planning")
+        goals = self.pathplanner.plan(goal)
+        print("waypoints : ", goals)
+        waypoint = goals[1]
+
+        if waypoint is None:
+            local_waypoint = np.array((10, 0))
+        else:
+            local_waypoint = np.array((self.occupancy_grid2.shape[0] - waypoint[0], waypoint[1] - 0.5 * self.occupancy_grid2.shape[1]))
+
+        distance = np.linalg.norm(local_waypoint)
+
+        # rospy.logwarn(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
+        if self.state == 2 and not self.target_gate is None:
+            if (abs(self.gates[self.target_gate].get_center_pos()[0] - self.occupancy_grid.shape[1] ) < 3) and (abs(self.gates[self.target_gate].get_center_pos()[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 4):
+                rospy.logwarn("TRANSITED")
+                self.state = 1
+                self.current_index += 1
+            # print("TARGET CENTER POS ", self.gates[self.target_gate].get_center_pos(), self.occupancy_grid.shape)
+
+        if distance < 5.0 and not self.found_colors:  
+            self.ang_vel = -0.4
+            self.cmd_speed = 0
+        elif distance < 5.0 and self.found_colors and not self.state==2:
+            print("Transitting.")
+            self.state = 2
+        # elif distance < 5.0 and self.found_colors and self.state == 2:
+        #     rospy.logwarn("Transitted.")
+        #     self.current_index += 1
+        #     self.state = 1
+        elif not distance < 5.0:
+            heading = math.atan2(local_waypoint[1], local_waypoint[0])
+
+            print("DISTANDHEADINIG", distance, heading)
+
+            for i in goals[1:]:
+                pass
+                # self.occupancy_grid2[int(i[0]),int(i[1])] = 0
+
+            if abs(heading) > 0.6:
+                self.cmd_speed = 0
+            
+            self.ang_vel = heading * -1.5
+        
+
+
+
+
+        
+
+        print("ang_vel", self.ang_vel)
         pass
-
 
 if __name__ == "__main__":
     rospy.init_node("lane_detection", anonymous = True)
-    camera_process = CameraProcess()
+    turtle_controller = TurtleController()
     rate = rospy.Rate(10)
     while(not rospy.is_shutdown()):
-        camera_process.make_cmd()
+        # Run it at a fixed rate
+        # Helps with differentiation, timeouts, etc
+        turtle_controller.make_cmd()
         rate.sleep()
+
     stop = Twist()
     stop.angular.z = 0
     stop.linear.x = 0
-    camera_process.cmd_vel_pub.publish(stop)
+    turtle_controller.cmd_vel_pub.publish(stop)
