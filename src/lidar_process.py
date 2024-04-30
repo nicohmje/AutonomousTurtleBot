@@ -49,8 +49,8 @@ class LidarProcess:
         self.anti_jumping_filter_range = rospy.get_param('/anti_jumping_filter_range', default = 5)
 
         # all the following parameters could be set in the launch file
-        self.min_angle_deg          = rospy.get_param("/lidar_min_angle_deg", -180) # in degrees
-        self.max_angle_deg          = rospy.get_param("/lidar_max_angle_deg", 180) 
+        self.min_angle_deg          = rospy.get_param("/lidar_min_angle_deg", -90) # in degrees
+        self.max_angle_deg          = rospy.get_param("/lidar_max_angle_deg", 90) 
         self.min_angle_rad          = self.min_angle_deg * np.pi / 180 # in radians
         self.max_angle_rad          = self.max_angle_deg * np.pi / 180 # in radians
 
@@ -75,12 +75,12 @@ class LidarProcess:
         # 1
 
 
-            self.LOOKAHEAD = 0.7 #meters
+            self.LOOKAHEAD = 1 #meters
             self.CELLS_PER_METER = 50
             self.IS_FREE = 0
             self.IS_OCCUPIED = 100
             self.grid_height = int(self.LOOKAHEAD * self.CELLS_PER_METER)
-            self.grid_width = int(1 * self.CELLS_PER_METER)
+            self.grid_width = int(2 * self.CELLS_PER_METER)
 
 
 

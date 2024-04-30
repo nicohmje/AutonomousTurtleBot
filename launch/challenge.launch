@@ -2,7 +2,7 @@
 <launch>
 
 <include file="$(find gazebo_ros)/launch/empty_world.launch">
-    <arg name="world_name" value="$(find projet)/worlds/Projet2024_2.world"/>
+    <arg name="world_name" value="$(find projet)/worlds/Projet2024_og.world"/>
     <arg name="paused" value="false"/>
     <arg name="use_sim_time" value="true"/>
     <arg name="gui" value="true"/>
@@ -20,6 +20,7 @@
 
 
 <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher"/>
+<include file="$(find projet)/launch/simu_process.launch"/>
 <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"/>
 
 
@@ -34,6 +35,8 @@
     <remap from="camera_info" to="camera/camera_info_correct"/>
     
   </node>
+
+
 
 
 <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find projet/rviz/turtlebot.rviz"/> -->
