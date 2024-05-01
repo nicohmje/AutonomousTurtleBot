@@ -9,6 +9,8 @@ import cv2 as cv
 from scipy import signal
 from sklearn.cluster import DBSCAN
 from skimage.morphology import dilation, disk
+from skimage.draw import line
+
 
 
 from cv_bridge import CvBridge, CvBridgeError
@@ -22,31 +24,25 @@ from std_msgs.msg import Int32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 
-
-
 class Nodes:
-    """Class to store the RRT graph"""
     def __init__(self, x,y):
         self.x = x
         self.y = y
-        self.parent_x = []
-        self.parent_y = []
-    def get_pos(self):
-        return (self.x,self.y)
+        self.cost = float('inf')
+        self.parent = None
+        self.children = []
 
-
-class RRTPlanning:
-
-    def __init__(self, step):
+class RRTStarPlanning:
+    def __init__(self, step=4, radius=20, max_iters=600):
         self.img = None
+        self.radius = radius
         self.stepSize= step
-        self.node_list = [0]
+        self.max_iters = max_iters
 
 
     def set_image(self, img):
         self.img = img
-        print("shp", self.img.shape)
-        self.start = (self.img.shape[0]-1, img.shape[1]//2,)
+        self.start = (self.img.shape[0]-1, img.shape[1]//2)
 
     def plan(self, end):
         if self.img is None:
@@ -59,92 +55,88 @@ class RRTPlanning:
         x = (self.img.shape[0]-1) - (rel[0]*50)
         y = (self.img.shape[1]//2) - (rel[1]*50)
         return (int(x),int(y))
-
     
-    def traverse_grid(self, x1, y1, x2, y2):
-        """
-        Bresenham's line algorithm for fast voxel traversal
-
-        CREDIT TO: Rogue Basin
-        CODE TAKEN FROM: http://www.roguebasin.com/index.php/Bresenham%27s_Line_Algorithm
-        """
-        # Setup initial conditions
-        dx = x2 - x1
-        dy = y2 - y1
-
-        # Determine how steep the line is
-        is_steep = abs(dy) > abs(dx)
-
-        # Rotate line
-        if is_steep:
-            x1, y1 = y1, x1
-            x2, y2 = y2, x2
-
-        # Swap start and end points if necessary and store swap state
-        if x1 > x2:
-            x1, x2 = x2, x1
-            y1, y2 = y2, y1
-
-        # Recalculate differentials
-        dx = x2 - x1
-        dy = y2 - y1
-
-        # Calculate error
-        error = int(dx / 2.0)
-        ystep = 1 if y1 < y2 else -1
-
-        # Iterate over bounding box generating points between start and end
-        y = y1
-        points = []
-        for x in range(x1, x2 + 1):
-            coord = (y, x) if is_steep else (x, y)
-            points.append(coord)
-            error -= abs(dy)
-            if error < 0:
-                y += ystep
-                error += dx
-        return points
-    
-
     def collision(self, x1, y1, x2, y2):
-        for cell in self.traverse_grid(x1, y1, x2, y2):
-            # print(cell, self.img[cell[0], cell[1]])
-            if self.img[cell[0], cell[1]] == 0:
+        # Switched from bresenham to skimage.draw.line
+        discrete_line = (zip(*line(x1,y1,x2,y2)))
+        for point in discrete_line:
+            if self.img[point[0], point[1]] == 0:  # Assuming obstacle is white
                 return True
         return False
 
     # check the  collision with obstacle and trim
     def check_collision(self, x1,y1,x2,y2):
-        _,theta = self.dist_and_angle(x2,y2,x1,y1)
-        x=int(x2 + self.stepSize*np.cos(theta))
-        y=int(y2 + self.stepSize*np.sin(theta))
-
         hx,hy=self.img.shape
-        if y<0 or y>=hy or x<0 or x>=hx:
-            
+        if y1<0 or y1>hy or x1<0 or x1>hx:
             directCon = False
             nodeCon = False
         else:
             # check direct connection
-            if self.collision(x,y,self.end[0],self.end[1]):
+            if self.collision(x1,y1,self.end[0],self.end[1]):
                 directCon = False
             else:
-
-                directCon=True
+                dst, _ = self.dist_and_angle(x1,y1,self.end[0],self.end[1])
+                if dst > self.stepSize*2:
+                    directCon = True
+                else:
+                    directCon=True
 
             # check connection between two nodes
-            if self.collision(x,y,x2,y2):
+            if self.collision(x1,y1,x2,y2):
                 nodeCon = False
             else:
                 nodeCon = True
 
-        return(x,y,directCon,nodeCon)
+        return(directCon,nodeCon)
 
-    # return dist and angle b/w new point and nearest node
+    # return dist and angle b/w two points
     def dist_and_angle(self, x1,y1,x2,y2):
         dist = math.sqrt( ((x1-x2)**2)+((y1-y2)**2) )
         angle = math.atan2(y2-y1, x2-x1)
         return(dist,angle)
+    
+    # b/w two nodes
+    def distance(self, n1, n2):
+        dist = math.sqrt( ((n2.x-n1.x)**2)+((n2.y-n1.y)**2) )
+        return dist
+    
+    def near_nodes(self, new_node):
+        return [node for node in self.node_list if self.distance(node, new_node) < self.radius]
+
+    def best_parent(self, nx, ny):
+        best_cost = float('inf')
+        best_node = None
+        next_node = Nodes(nx, ny)
+        for i in range(len(self.node_list)):
+            n = self.node_list[i]
+            dst = self.distance(n, next_node)
+            if dst > self.radius:
+                continue
+            cost = n.cost + dst
+            if cost<best_cost and not self.collision(n.x, n.y, next_node.x, next_node.y):
+                best_cost = cost
+                best_node = i
+        return best_node, best_cost
+    
+    def rewire(self, new_node, near_nodes):
+        for node in near_nodes:
+            cost_via_new_node = new_node.cost + self.distance(new_node, node)
+            # print("new, old cost", cost_via_new_node, node.cost)
+            if cost_via_new_node < node.cost and not self.collision(new_node.x , new_node.y, node.x, node.y):
+                if node.parent:
+                    node.parent.children.remove(node)
+                node.parent = new_node
+                new_node.children.append(node)
+                node.cost = cost_via_new_node
+                self.update_children_costs(node)  # Recursively update costs of all children
+
+    def update_children_costs(self, node):
+        for child in node.children:
+            proposed_cost = node.cost + self.distance(node, child)
+            if proposed_cost < child.cost:
+                # print("UPDATED CHILD NODE COST")
+                child.cost = proposed_cost
+                self.update_children_costs(child)  # Recursively update children's costs
 
     # return the neaerst node index
     def nearest_node(self, x,y):
@@ -165,26 +157,24 @@ class RRTPlanning:
         h,l= self.img.shape # dim of the loaded image
 
         if self.img[self.start[0], self.start[1]] == 0:
-            print("START IS COLLISION")
             return [None, None]
         
-        if self.img[self.end[0], self.end[1]] == 0:
-            print("END IS COLLISION")
-            return [None, None]
+        # if self.img[self.end[0], self.end[1]] == 0:
+        #     print("END IS COLLISION")
+        #     return [None, None]
 
         if not self.collision(self.start[0], self.start[1], self.end[0], self.end[1]):
-            print("No obstacles, go directly to waypoint")
             return [self.start, self.end]
                
         self.node_list[0] = Nodes(self.start[0],self.start[1])
-        self.node_list[0].parent_x.append(self.start[0])
-        self.node_list[0].parent_y.append(self.start[1])
+        self.node_list[0].parent = None
+        self.node_list[0].cost = 0
 
         i=1
         pathFound = False
         while pathFound==False:
-            if i > 200:
-                rospy.logwarn("ABORTING, TOO LONG, GO FORWARDS")
+            # print(f"iter {i}")
+            if i > self.max_iters:
                 return [None, None]
             
             nx,ny = self.rnd_point(h,l)
@@ -192,49 +182,69 @@ class RRTPlanning:
             nearest_ind = self.nearest_node(nx,ny)
             nearest_x = self.node_list[nearest_ind].x
             nearest_y = self.node_list[nearest_ind].y
+
+            _,theta = self.dist_and_angle(nearest_x,nearest_y,nx,ny)
+            tx=int(nearest_x + self.stepSize*np.cos(theta))
+            ty=int(nearest_y + self.stepSize*np.sin(theta))
             
+            if ty<0 or ty>self.img.shape[1]-1 or tx<0 or tx>self.img.shape[0]-1:
+                continue
+
+            nearest_ind, new_cost = self.best_parent(tx, ty)
+
+            if nearest_ind is None:
+                continue
+                
             #check direct connection
-            tx,ty,directCon,nodeCon = self.check_collision(nx,ny,nearest_x,nearest_y)
+            directCon,nodeCon = self.check_collision(tx,ty,nearest_x,nearest_y)
             # print("Check collision:",tx,ty,directCon,nodeCon)
 
             
             if directCon and nodeCon:
-                print("Node can connect directly with end")
                 self.node_list.append(i)
                 self.node_list[i] = Nodes(tx,ty)
-                self.node_list[i].parent_x = self.node_list[nearest_ind].parent_x.copy()
-                self.node_list[i].parent_y = self.node_list[nearest_ind].parent_y.copy()
-                self.node_list[i].parent_x.append(tx)
-                self.node_list[i].parent_y.append(ty)
-                checkpoints = []
-                for j in range(len(self.node_list[i].parent_x)):
-                    checkpoints.append((int(self.node_list[i].parent_x[j]),int(self.node_list[i].parent_y[j])))
 
-                break
+                self.node_list[i].parent = self.node_list[nearest_ind]
+                self.node_list[nearest_ind].children.append(self.node_list[i])
+                self.node_list[i].cost = new_cost
+
+                self.rewire(self.node_list[i], self.near_nodes(self.node_list[i]))
+
+                # print(f"Path has been found in {i} iterations")
+
+                node = self.node_list[i]
+                pos = (node.x, node.y)
+                checkpoints = [self.end, pos]
+                while True:
+                    pos, node = self.get_parent_coord(node)
+                    checkpoints.append(pos)
+                    if node is None:
+                        break
+                return checkpoints
 
             elif nodeCon:
+
                 self.node_list.append(i)
                 self.node_list[i] = Nodes(tx,ty)
-                self.node_list[i].parent_x = self.node_list[nearest_ind].parent_x.copy()
-                self.node_list[i].parent_y = self.node_list[nearest_ind].parent_y.copy()
-                # print(i)
-                # print(self.node_list[nearest_ind].parent_y)
-                self.node_list[i].parent_x.append(tx)
-                self.node_list[i].parent_y.append(ty)
-                i=i+1
+                self.node_list[i].parent = self.node_list[nearest_ind]
+                self.node_list[nearest_ind].children.append(self.node_list[i])
+                self.node_list[i].cost = new_cost
+
+                self.rewire(self.node_list[i], self.near_nodes(self.node_list[i]))
+                i += 1
                 continue
 
             else:
                 continue
-            
-        checkpoints = []
-        for i in self.node_list:
-            point = i.get_pos()
+    
+    def get_parent_coord(self,node):
+        if node.parent is None:
+            return self.start, None
+        x = node.parent.x 
+        y = node.parent.y
+        parent = node.parent
 
-            checkpoints.append(i.get_pos())
-        checkpoints.append(self.end)
-        return checkpoints
-
+        return (x,y), parent
 
 
 class Bottle:
@@ -302,7 +312,7 @@ class Gate:
         self.confirmed = False
         self.color = color
 
-        print("New gate alert! :", self.bottle_index1,self.bottle_index2)
+        # print("New gate alert! :", self.bottle_index1,self.bottle_index2)
 
     def confirm(self):
         self.confirmed = True
@@ -365,10 +375,12 @@ class TurtleController:
 
             self.detect_stepline = False
 
-            self.step = 2
+            self.step = 4
 
             self.ang_vel = 0
             self.cmd_speed = 0
+
+            self.error = 0
 
 
             self.min_angle_deg = -90
@@ -395,6 +407,7 @@ class TurtleController:
             self.inside_tunnel = False
 
             self.cv_image = None
+            self.image = None
             self.cv_image_rect = None
 
             self.order = [1,0,2] #0 blue, 1 green, 2 yellow
@@ -406,7 +419,8 @@ class TurtleController:
             self.get_params()
 
             rospy.logwarn("CHANGE THIS")
-            self.pathplanner = RRTPlanning(2) #CHANGE THISSSSS
+            self.pathplanner = RRTStarPlanning(step=6, radius=60, max_iters=400) #CHANGE THISSSSS
+            # self.pathplanner = RRTPlanning(6)
             self.bottles = []
             self.gates = []
 
@@ -574,7 +588,7 @@ class TurtleController:
         print("OccupCB", self.occupancy_grid.shape)
 
         if self.step == 5:
-            if self.current_index == 2:
+            if self.current_index == 3:
                 rospy.signal_shutdown("Finished all challenges.")
             self.last_challenge()
 
@@ -615,7 +629,7 @@ class TurtleController:
                 pass
 
         elif self.step == 4:
-            if self.cv_image is None:
+            if self.image is None:
                 rospy.logwarn("No image received!")
                 pass
             else:
@@ -641,10 +655,10 @@ class TurtleController:
             # self.ang_vel = 0.1 * self.ang_vel
         cmd_twist.angular.z = self.ang_vel
 
-        print("ang vel, speed", self.ang_vel, self.cmd_speed)
+        # print("ang vel, speed", self.ang_vel, self.cmd_speed)
 
         # speed pub
-        # self.cmd_vel_pub.publish(cmd_twist)
+        self.cmd_vel_pub.publish(cmd_twist)
 
 
     def lidarCB(self, data:LaserScan) :
@@ -886,7 +900,8 @@ class TurtleController:
         if self.laser_scan is None:
                 rospy.logwarn("No LiDAR data received!")
                 return
-        self.second_process(self.cv_image_rect)
+        if self.step == 2:
+            self.second_process(self.cv_image_rect)
 
 
     def obstacle_detection(self):
@@ -927,7 +942,7 @@ class TurtleController:
     
         rows, cols = self.image.shape[:2]
         
-        speed = 0.05
+        speed = 0.2
 
         # if self.step == 2 and self.sim:
         #     speed = 0.2
@@ -945,7 +960,6 @@ class TurtleController:
         if np.isnan(self.left_lane[1]):
             if np.isnan(self.right_lane[1]):
                 print("left and right nan")
-
                 center_of_road = self.error + self.image.shape[1]//2
                 speed = 0
             else:
@@ -1519,7 +1533,7 @@ class TurtleController:
             stepline_area = area
 
 
-            print("AREA STEPLINE  ", stepline_area)
+            # print("AREA STEPLINE  ", stepline_area)
 
             lower = (15000,2400)[self.sim]
             upper = (30000,3200)[self.sim] 
@@ -1527,18 +1541,18 @@ class TurtleController:
             last_detection_threshold = (6,14)[self.sim and self.step == 2]
 
 
-            # if (stepline_area > lower and stepline_area < upper):
-            #     if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < last_detection_threshold):
-            #         print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
-            #         pass
-            #     else:
-            #         self.detect_stepline = True
-            # else:
-            #     if self.detect_stepline:
-            #         rospy.logwarn(f"STEP + 1")
-            #         self.step +=1
-            #         self.last_detection = rospy.Time.now()
-            #         self.detect_stepline = False
+            if (stepline_area > lower and stepline_area < upper):
+                if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < last_detection_threshold):
+                    # print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
+                    pass
+                else:
+                    self.detect_stepline = True
+            else:
+                if self.detect_stepline:
+                    rospy.logwarn(f"STEP + 1")
+                    self.step +=1
+                    self.last_detection = rospy.Time.now()
+                    self.detect_stepline = False
 
 
             if self.sim:
@@ -1610,17 +1624,16 @@ class TurtleController:
         self.occupancy_grid2 = cv.cvtColor(self.occupancy_grid2, cv.COLOR_BGR2GRAY)
 
         OccuGrid2 = (np.argwhere(lidar_occup == 100))
-        n_clusters_ = 0
+        # n_clusters_ = 0
 
         if OccuGrid2.shape[0]: 
 
             clustering = DBSCAN(eps=3, min_samples=10).fit(OccuGrid2)
             
             labels = clustering.labels_
-            n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+            # n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
 
-            print("clusters ", n_clusters_)
-
+            # print("clusters ", n_clusters_)
 
             unique_labels = set(labels)
             core_samples_mask = np.zeros_like(labels, dtype=bool)
@@ -1628,9 +1641,9 @@ class TurtleController:
 
             colors = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
             for k, col in zip(unique_labels, colors):
-                if k == -1:
-                    # Black used for noise.
-                    col = [0, 0, 0, 1]
+                # if k == -1:
+                #     # Black used for noise.
+                #     col = [0, 0, 0, 1]
 
                 class_member_mask = labels == k
 
@@ -1652,7 +1665,7 @@ class TurtleController:
                         else:
                             continue
                     if not matched and not self.confirmed:
-                        print("new bottle discovered!", (x,y))
+                        # print("new bottle discovered!", (x,y))
                         self.bottles.append(Bottle(len(self.bottles), position=(x,y), shape=self.occupancy_grid.shape))
                     # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
 
@@ -1664,7 +1677,7 @@ class TurtleController:
 
         
 
-        target_distance = (19.0, 26.5)[self.sim]
+        target_distance = (19.0, 23.)[self.sim]
         tolerance = (2.5, 3.0)[self.sim]
 
         if not self.confirmed:
@@ -1676,13 +1689,12 @@ class TurtleController:
                         x1, y1 = self.bottles[i].get_position()
                         x2, y2 = self.bottles[j].get_position()
                         distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                        # print("Dist: ", distance)
                         if abs(distance - target_distance) < tolerance:
                             potential_neighbors[i].append(j)
-                            print(distance)
+                            # print(distance)
                             # print(i,j)
                             
-            print("potential", potential_neighbors)
+            # print("potential", potential_neighbors)
 
             for i in potential_neighbors:
                 if len(potential_neighbors[i]) == 1:
@@ -1701,14 +1713,13 @@ class TurtleController:
                 if len(res_neighbors[i])==1:
                     neighbors.append((i, res_neighbors[i][0]))
                 else:
-                    print(f"ambiguity for {i}")
+                    pass
+                    # print(f"ambiguity for {i}")
 
-            print("neighbors:", neighbors)
+            # print("neighbors:", neighbors)
 
 
             for i in neighbors:
-
-                print((self.bottles[i[0]].get_gate(), (self.bottles[i[1]].get_gate())))
                 if self.bottles[i[0]].get_gate() is None or self.bottles[i[1]].get_gate() is None:
                     pass
                 else:
@@ -1741,7 +1752,8 @@ class TurtleController:
                     nb[i.get_gate()] += 1
 
                     if self.gates[i.get_gate()].get_color() == self.order[self.current_index] and self.found_colors:
-                        print("Opened target gate")
+                        pass
+                        # print("Opened target gate")
                     else:
                         # self.occupancy_grid2[self.gates[i.get_gate()].get_center_pos()[0], self.gates[i.get_gate()].get_center_pos()[1]] = 127
                         b1,b2 = self.gates[i.get_gate()].get_bottles_indices()
@@ -1772,8 +1784,8 @@ class TurtleController:
             for i in self.active_gates:
                 self.gates[i].confirm()
 
-        print("Active gates ", len(self.active_gates))
-        print("nb bottles: ", len(self.bottles))
+        # print("Active gates ", len(self.active_gates))
+        # print("nb bottles: ", len(self.bottles))
 
         self.merge_occup_grids()
         self.last_challenge2()
@@ -1822,7 +1834,7 @@ class TurtleController:
 
         for i in contours_blue:
             if cv.contourArea(i) > threshold:
-                print("contour blue area: ", cv.contourArea(i))
+                # print("contour blue area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
@@ -1832,7 +1844,7 @@ class TurtleController:
 
         for i in contours_green:
             if cv.contourArea(i) > threshold:
-                print("contour green area: ", cv.contourArea(i))
+                # print("contour green area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
@@ -1842,7 +1854,7 @@ class TurtleController:
 
         for i in contours_yellow:
             if cv.contourArea(i) > threshold:
-                print("contour yellow area: ", cv.contourArea(i))
+                # print("contour yellow area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
@@ -1900,8 +1912,8 @@ class TurtleController:
                 rospy.logwarn(f"FOUND COLOR FOR GATE {gate}, COLOR IS {color}")
                 self.gates[gate[0]].set_colour(color, self.bottles)
 
-        for gate in self.active_gates:
-            print(gate, self.gates[gate].get_color())
+        # for gate in self.active_gates:
+            # print(gate, self.gates[gate].get_color())
 
 
 
@@ -1926,7 +1938,7 @@ class TurtleController:
             elif len(colours) == 1:
                 for i in self.bottles:
                     if i.get_gate() is None:
-                        print(f"Go to this position {i.get_position()}")
+                        # print(f"Go to this position {i.get_position()}")
                         goal_point = np.array(i.get_position())
 
 
@@ -1934,7 +1946,7 @@ class TurtleController:
             distances = []
             indices = []
             if len(colours) > 0:
-                print("Not found the one we want yet. We'll explore a bit.")
+                # print("Not found the one we want yet. We'll explore a bit.")
                 for i in self.active_gates:
                     if self.gates[i].get_color() is None:
                         if not self.gates[i].get_offset_points()[0] is None:
@@ -1946,14 +1958,14 @@ class TurtleController:
             else:
                 for i in self.active_gates:
                     if self.gates[i].get_color() == self.order[self.current_index]:
-                        print("GOING TO THE CORRECT ONE!")
+                        # print("GOING TO THE CORRECT ONE!")
                         self.found_colors = True
                         self.state = 1
                         goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
                         self.target_gate = i
 
             if len(points)>0:
-                print("Closest point :" , points[np.argmin(distances)])
+                # print("Closest point :" , points[np.argmin(distances)])
                 self.target_gate = indices[np.argmin(distances)]
                 goal_point = points[np.argmin(distances)]
 
@@ -1982,7 +1994,6 @@ class TurtleController:
 
         image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
         self.image_pub.publish(image_message)
-        self.publish_occupancy_grid()
 
 
     def closest_point(self, points, closest=True):
@@ -2022,7 +2033,7 @@ class TurtleController:
         if goal[0] >= self.occupancy_grid.shape[1]:
                 goal[0] = self.occupancy_grid.shape[1]-1
 
-        print("GOAL", goal)
+        # print("GOAL", goal, self.occupancy_grid.shape, self.occupancy_grid2.shape)
 
 
         occu_grid_cp = (self.occupancy_grid2 > 95)
@@ -2038,9 +2049,12 @@ class TurtleController:
 
         self.occupancy_grid2 = inflated_obstacles
 
-        print("starting path planning")
+        self.publish_occupancy_grid()
+
+
+        # print("starting path planning")
         goals = self.pathplanner.plan(goal)
-        print("waypoints : ", goals)
+        # print("waypoints : ", goals)
         waypoint = goals[1]
 
         if waypoint is None:
@@ -2050,28 +2064,28 @@ class TurtleController:
 
         distance = np.linalg.norm(local_waypoint)
 
-        print(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
+        # print(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
         if self.state == 2 and not self.target_gate is None:
             if (abs(self.gates[self.target_gate].get_center_pos()[0] - self.occupancy_grid.shape[1] ) < 3) and (abs(self.gates[self.target_gate].get_center_pos()[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 4):
                 rospy.logwarn("TRANSITED")
                 self.state = 1
                 self.current_index += 1
-            print("TARGET CENTER POS ", self.gates[self.target_gate].get_center_pos(), self.occupancy_grid.shape)
+            # print("TARGET CENTER POS ", self.gates[self.target_gate].get_center_pos(), self.occupancy_grid.shape)
 
         if distance < 5.0 and not self.found_colors:  
 
             target_point, _ = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)
-            print("Target point: ", target_point)
+            # print("Target point: ", target_point)
             heading = math.atan2(target_point[1], target_point[0])
-        
-            self.ang_vel = heading * 1.5
+            Kp = (1.5, -1.5)[self.sim]
+            self.ang_vel = heading * Kp
             self.cmd_speed = 0
 
 
 
 
         elif distance < 5.0 and self.found_colors and not self.state==2:
-            print("Transitting.")
+            # print("Transitting.")
             self.state = 2
         # elif distance < 5.0 and self.found_colors and self.state == 2:
         #     rospy.logwarn("Transitted.")
@@ -2080,7 +2094,7 @@ class TurtleController:
         elif not distance < 5.0:
             heading = math.atan2(local_waypoint[1], local_waypoint[0])
 
-            print("DISTANDHEADINIG", distance, heading)
+            # print("DISTANDHEADINIG", distance, heading)
 
             for i in goals[1:]:
                 pass
@@ -2099,7 +2113,7 @@ class TurtleController:
 
         
 
-        print("ang_vel", self.ang_vel)
+        # print("ang_vel", self.ang_vel)
         pass
 
 if __name__ == "__main__":
