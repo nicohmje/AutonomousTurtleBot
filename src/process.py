@@ -56,6 +56,11 @@ class RRTStarPlanning:
         y = (self.img.shape[1]//2) - (rel[1]*50)
         return (int(x),int(y))
     
+    def grid_to_rel(self, grid):
+        x = (self.img.shape[0]-1 - grid[0])/50.
+        y = ((self.img.shape[1]//2) - grid[1])/50.
+        return (x, y)
+    
     def collision(self, x1, y1, x2, y2):
         # Switched from bresenham to skimage.draw.line
         discrete_line = (zip(*line(x1,y1,x2,y2)))
@@ -258,7 +263,7 @@ class Bottle:
         self.dx = 0
 
     def get_position(self):
-        return (round(self.position[0]), round(self.position[1]))
+        return (self.position[0], self.position[1])
     
     def set_position(self, position:tuple):
         self.position = position
@@ -277,27 +282,7 @@ class Bottle:
     
     def get_index(self):
         return self.index
-            
-    def apply_transform(self, delta):
-        self.last_iter_update = 0
-        CPM = 50
-        self.dx = delta[0] * CPM
-        x = self.shape[1] -self.position[0]
-        y = self.shape[0]//2 - self.position[1] 
-
         
-        x_ = x * math.cos(delta[1]) - y * math.sin(delta[1])
-        y_ = x * math.sin(delta[1]) + y * math.cos(delta[1])
-
-        x_ = self.shape[1] - x_
-        y_ = self.shape[0]//2 - y_
-
-        x_ += self.dx
-        self.set_position((x_, y_))
-        # print("old pos :", self.position)
-        # print("new pos :", self.position)
-        pass
-
 
 
 class Gate:
@@ -344,10 +329,10 @@ class Gate:
         perp_vec = np.array([-vec[1], vec[0]])
         unit_perp_vec = perp_vec / np.linalg.norm(perp_vec)
 
-        offset = 12 #Self.sim 12
+        offset = 0.24 #Self.sim 12
 
-        cX = round(np.mean([c1[0],c2[0]]))
-        cY = round(np.mean([c1[1],c2[1]]))
+        cX = np.mean([c1[0],c2[0]])
+        cY = np.mean([c1[1],c2[1]])
 
         self.center_position = (cX, cY)
 
@@ -375,7 +360,8 @@ class TurtleController:
 
             self.detect_stepline = False
 
-            self.step = 4
+            self.step = 5
+
 
             self.ang_vel = 0
             self.cmd_speed = 0
@@ -426,7 +412,7 @@ class TurtleController:
 
             self.color_to_gate = {0:None, 1:None, 2:None}
 
-            self.same_bottle_threshold = 6
+            self.same_bottle_threshold = (6,0.12)[self.sim]
             self.confirmed = False
 
             self.found_colors = False
@@ -453,6 +439,26 @@ class TurtleController:
         cmd_twist.linear.x = 0
 
         self.cmd_vel_pub.publish(cmd_twist)
+
+
+
+    def turtle_to_odom(self, rel):
+        #Convert from turtle frame to odom fram
+        rel = self.pathplanner.grid_to_rel(rel)
+        
+        y = self.pos[1] + (math.sin(self.theta) * rel[0] + math.cos(self.theta) * rel[1])
+        x = self.pos[0] + (math.cos(self.theta) * rel[0] - math.sin(self.theta) * rel[1])
+        return (x,y)
+    
+    def odom_to_grid(self, odom):
+        #convert from odom frame to turtle(occup grid) frame
+        x_prime = odom[0] - self.pos[0]
+        y_prime = odom[1] - self.pos[1]
+        rel_0 = x_prime * math.cos(self.theta) + y_prime * math.sin(self.theta)
+        rel_1 = -x_prime * math.sin(self.theta) + y_prime * math.cos(self.theta)
+        return self.pathplanner.rel_to_grid((rel_0, rel_1))
+
+
     
 
     def odomCB(self, msg:Odometry):
@@ -463,22 +469,6 @@ class TurtleController:
         self.theta = math.atan2(2*x*y + 2 * z * w, 1 - 2*y*y - 2*z*z)
         self.pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
         
-        if not self.old_pos is None:
-            dx, dy = self.old_pos[0]-self.pos[0], self.old_pos[1] - self.pos[1]
-            dtheta = self.old_theta - self.theta
-
-            distance = math.sqrt(dx**2 + dy**2)
-
-            # direction = round((math.atan2(dy, dx) - self.old_theta)/math.pi)
-
-            # distance *= (-1, 1, -1)[direction] 
-            # print("dist and dir ", distance, direction)
-
-            self.delta = (distance,  dtheta)
-            for i in self.bottles:
-                # print(i.get_position())
-                i.apply_transform(self.delta)    
-            pass
 
 
 
@@ -1623,6 +1613,9 @@ class TurtleController:
 
         self.occupancy_grid2 = cv.cvtColor(self.occupancy_grid2, cv.COLOR_BGR2GRAY)
 
+        self.pathplanner.set_image(self.occupancy_grid2)
+
+
         OccuGrid2 = (np.argwhere(lidar_occup == 100))
         # n_clusters_ = 0
 
@@ -1651,7 +1644,14 @@ class TurtleController:
                 if len(xy)>0:
                     x = round(np.mean(xy[:,0]))
                     y = round(np.mean(xy[:,1]))
+
+                    print("LEN XY ", len(xy))
+
+                    x, y = self.turtle_to_odom((x,y))
+
                     matched = False
+
+
                     for i in self.bottles:
                         x2, y2 = i.get_position()
                         distance = math.sqrt((x2 - x)**2 + (y2 - y)**2)
@@ -1665,8 +1665,8 @@ class TurtleController:
                         else:
                             continue
                     if not matched and not self.confirmed:
-                        # print("new bottle discovered!", (x,y))
-                        self.bottles.append(Bottle(len(self.bottles), position=(x,y), shape=self.occupancy_grid.shape))
+                        print("new bottle discovered!", (x,y),)
+                        self.bottles.append(Bottle(len(self.bottles), (x,y), shape=self.occupancy_grid.shape))
                     # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
 
 
@@ -1677,8 +1677,8 @@ class TurtleController:
 
         
 
-        target_distance = (19.0, 23.)[self.sim]
-        tolerance = (2.5, 3.0)[self.sim]
+        target_distance = (19.0, 0.46)[self.sim]
+        tolerance = (2.5, 0.06)[self.sim]
 
         if not self.confirmed:
             for i in range(len(self.bottles)):
@@ -1689,6 +1689,7 @@ class TurtleController:
                         x1, y1 = self.bottles[i].get_position()
                         x2, y2 = self.bottles[j].get_position()
                         distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                        # print("DISTANCE BETWEEN BOTTLES ", distance)
                         if abs(distance - target_distance) < tolerance:
                             potential_neighbors[i].append(j)
                             # print(distance)
@@ -1728,8 +1729,8 @@ class TurtleController:
                 c1 = self.bottles[i[0]].get_position()
                 c2 = self.bottles[i[1]].get_position()
 
-                cX = round(np.mean([c1[0],c2[0]]))
-                cY = round(np.mean([c1[1],c2[1]]))
+                cX = np.mean([c1[0],c2[0]])
+                cY = np.mean([c1[1],c2[1]])
 
                 # self.occupancy_grid2[cX,cY] = 127
 
@@ -1757,14 +1758,15 @@ class TurtleController:
                     else:
                         # self.occupancy_grid2[self.gates[i.get_gate()].get_center_pos()[0], self.gates[i.get_gate()].get_center_pos()[1]] = 127
                         b1,b2 = self.gates[i.get_gate()].get_bottles_indices()
-                        cells = self.traverse_grid(self.bottles[b1].get_position(), self.bottles[b2].get_position())
+                        cells = self.traverse_grid(self.odom_to_grid(self.bottles[b1].get_position()), self.odom_to_grid(self.bottles[b2].get_position()))
                         # print("CELLS ", cells)
                         for c in cells:
                             self.occupancy_grid2[c[0],c[1]] = 127
                 except:
                     pass
             try:
-                self.occupancy_grid2[i.get_position()[0],i.get_position()[1]] = 100
+                pos = self.odom_to_grid(i.get_position())
+                self.occupancy_grid2[pos[0],pos[1]] = 100
             except:
                 pass
             # cv.circle(occu_grid35, [i.get_position()[0],i.get_position()[1]], 1, (0,255,0), 2)  
@@ -1894,7 +1896,7 @@ class TurtleController:
 
         for i in self.active_gates:
             if self.gates[i].get_color() is None:
-                center = self.gates[i].get_center_pos()
+                center = self.odom_to_grid(self.gates[i].get_center_pos())
                 local_center = (self.occupancy_grid.shape[1] - center[0], center[1] - 0.5*self.occupancy_grid.shape[0])
                 angle = math.atan2(local_center[1], local_center[0])
                 distance = math.sqrt(local_center[0]**2 + local_center[1]**2)
@@ -1998,8 +2000,10 @@ class TurtleController:
 
     def closest_point(self, points, closest=True):
         
-        point1 = points[0]
-        point2 = points[1]
+        point1 = self.odom_to_grid(points[0])
+        point2 = self.odom_to_grid(points[1])
+
+        
 
         # local_center = (self.occupancy_grid.shape[1] - center[0], center[1] - 0.5*self.occupancy_grid.shape[0])
         p1 = (self.occupancy_grid.shape[1] - point1[0], point1[1] - 0.5*self.occupancy_grid.shape[0])
@@ -2025,6 +2029,7 @@ class TurtleController:
 
         goal = np.array(goal, dtype=np.int16)
 
+        print("GOAL ", goal)
 
         self.cmd_speed = 0.15
 
@@ -2053,6 +2058,7 @@ class TurtleController:
 
 
         # print("starting path planning")
+
         goals = self.pathplanner.plan(goal)
         # print("waypoints : ", goals)
         waypoint = goals[1]
@@ -2066,11 +2072,10 @@ class TurtleController:
 
         # print(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
         if self.state == 2 and not self.target_gate is None:
-            if (abs(self.gates[self.target_gate].get_center_pos()[0] - self.occupancy_grid.shape[1] ) < 3) and (abs(self.gates[self.target_gate].get_center_pos()[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 4):
+            if (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[0] - self.occupancy_grid.shape[1] ) < 3) and (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 4):
                 rospy.logwarn("TRANSITED")
                 self.state = 1
                 self.current_index += 1
-            # print("TARGET CENTER POS ", self.gates[self.target_gate].get_center_pos(), self.occupancy_grid.shape)
 
         if distance < 5.0 and not self.found_colors:  
 
