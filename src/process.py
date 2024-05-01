@@ -45,6 +45,7 @@ class RRTPlanning:
 
     def set_image(self, img):
         self.img = img
+        print("shp", self.img.shape)
         self.start = (self.img.shape[0]-1, img.shape[1]//2,)
 
     def plan(self, end):
@@ -53,6 +54,12 @@ class RRTPlanning:
         self.node_list = [0]
         self.end = end
         return self.RRT()
+    
+    def rel_to_grid(self, rel):
+        x = (self.img.shape[0]-1) - (rel[0]*50)
+        y = (self.img.shape[1]//2) - (rel[1]*50)
+        return (int(x),int(y))
+
     
     def traverse_grid(self, x1, y1, x2, y2):
         """
@@ -358,16 +365,21 @@ class TurtleController:
 
             self.detect_stepline = False
 
-            self.step = 0
+            self.step = 2
 
             self.ang_vel = 0
             self.cmd_speed = 0
 
 
             self.min_angle_deg = -90
+
+            self.avg_radius = 0
+
+
             self.max_angle_deg = 90
 
             self.occupancy_grid = None
+            self.occupancy_grid2 = None
 
             self.left_lane = [np.nan, np.nan]  
             self.right_lane = [np.nan, np.nan]
@@ -393,8 +405,8 @@ class TurtleController:
             self.last_detection = None
             self.get_params()
 
-
-            self.pathplanner = RRTPlanning(6)
+            rospy.logwarn("CHANGE THIS")
+            self.pathplanner = RRTPlanning(2) #CHANGE THISSSSS
             self.bottles = []
             self.gates = []
 
@@ -408,7 +420,7 @@ class TurtleController:
             self.state = 0 #0 exploring, 1 transiting, 2 crossing 
             self.target_gate = None
 
-            rospy.on_shutdown()
+            rospy.on_shutdown(self.stop_and_clean_up)
 
 
         
@@ -436,6 +448,7 @@ class TurtleController:
         self.old_pos = self.pos
         self.theta = math.atan2(2*x*y + 2 * z * w, 1 - 2*y*y - 2*z*z)
         self.pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+        
         if not self.old_pos is None:
             dx, dy = self.old_pos[0]-self.pos[0], self.old_pos[1] - self.pos[1]
             dtheta = self.old_theta - self.theta
@@ -452,6 +465,100 @@ class TurtleController:
                 # print(i.get_position())
                 i.apply_transform(self.delta)    
             pass
+
+
+
+
+    def challenge_2(self):
+
+        # lidar_occup = np.copy(self.occupancy_grid.filled(0))
+        # lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))        
+        # occu_grid_cp = (lidar_occup > 95)
+
+        # # Create a structuring element (disk) corresponding to half the robot's width
+        # selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
+
+        # # Dilate the obstacle map
+        # inflated_obstacles = dilation(occu_grid_cp, selem)
+        # inflated_obstacles = np.where(inflated_obstacles, 0, 100)
+
+        # self.occupancy_grid2 = inflated_obstacles
+        if self.occupancy_grid2 is None:
+            return
+
+        self.pathplanner.set_image(self.occupancy_grid2)
+        self.publish_occupancy_grid()
+
+        goal = [1.4,1.7]
+
+        distance_to_goal = np.linalg.norm(np.array((goal[0] - self.pos[0], goal[1]-self.pos[1])))
+
+        angle_to_goal = (math.atan2(goal[1] - self.pos[1], goal[0] - self.pos[0])) - self.theta 
+
+
+        relative_pos = (math.cos(angle_to_goal)*distance_to_goal, math.sin(angle_to_goal)*distance_to_goal)
+
+
+        goal_grid_pos = self.pathplanner.rel_to_grid(relative_pos)
+        start_grid_pos = self.pathplanner.rel_to_grid((0,0))
+
+        print(start_grid_pos, goal_grid_pos)
+
+        cells = self.traverse_grid(goal_grid_pos, start_grid_pos)
+        
+        if cells[-1] == start_grid_pos:
+            cells.reverse()
+
+        closest_cell = None
+        s1, s2 = self.occupancy_grid2.shape
+
+        for i in cells:
+            if i[0]>(s1-1) or i[0]<0 or i[1]<0 or i[1]>(s2-1):
+                break
+            # else:
+            #     closest_cell = i
+            if self.occupancy_grid2[i[0], i[1]] == 100:
+                closest_cell = i
+
+
+
+        goals = self.pathplanner.plan(closest_cell)
+
+        print("GOAAALS ", goals)
+
+        self.cmd_speed = 0.1
+
+        target = goals[1]
+
+        if target is None:
+            local_waypoint = np.array((10, 0))
+        else:
+            local_waypoint = np.array((self.occupancy_grid2.shape[0] - target[0], target[1] - 0.5 * self.occupancy_grid2.shape[1]))
+
+        distance = np.linalg.norm(local_waypoint)
+        heading = math.atan2(local_waypoint[1], local_waypoint[0])
+
+        print("DISTANDHEADINIG", distance, heading)
+
+        for i in goals[1:]:
+            try:
+                self.occupancy_grid2[int(i[0]),int(i[1])] = 0
+            except:
+                pass
+
+        Kp = (-1.5, -1.5)[self.sim]
+
+        if abs(heading) > (0.3,0.6)[self.sim]:
+            self.cmd_speed = 0.
+        self.ang_vel = heading * Kp
+        
+
+
+
+
+
+
+
 
 
 
@@ -493,16 +600,16 @@ class TurtleController:
         elif self.step == 2:
             if self.laser_scan is None:
                 rospy.logwarn("No LiDAR data received!")
-                pass
             else:
-                self.lane_assist_controller()
-                self.obstacle_detection()
+                self.challenge_2()
+                # self.lane_assist_controller()
         
         elif self.step == 3:
             if self.laser_scan is None:
                 rospy.logwarn("No LiDAR data received!")
                 pass
             else:
+                # self.lane_assist_controller()
                 self.lidar_only()
                 # self.obstacle_detection()
                 pass
@@ -526,12 +633,15 @@ class TurtleController:
         cmd_twist.linear.x = self.cmd_speed
 
         if self.sim:
-            self.ang_vel = min(1.2, max(-1.2, self.ang_vel))
+            pass
+            self.ang_vel = min(1.6, max(-1.6, self.ang_vel))
         else:
             pass
             # self.ang_vel = min(1.3, max(-1.3, self.ang_vel))
             # self.ang_vel = 0.1 * self.ang_vel
         cmd_twist.angular.z = self.ang_vel
+
+        print("ang vel, speed", self.ang_vel, self.cmd_speed)
 
         # speed pub
         self.cmd_vel_pub.publish(cmd_twist)
@@ -575,7 +685,7 @@ class TurtleController:
         print("left ", dst_left)
         print("right ", dst_right)
 
-        inside_tunnel_threshold = (0.3, 0.7)[self.sim]
+        inside_tunnel_threshold = (0.3, 0.55)[self.sim]
 
         if dst_left < inside_tunnel_threshold and dst_right < inside_tunnel_threshold and self.inside_tunnel == False:
             print("entered tunnel")
@@ -773,6 +883,9 @@ class TurtleController:
 
     def callback_image_rect(self, msg):
         self.cv_image_rect = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        if self.laser_scan is None:
+                rospy.logwarn("No LiDAR data received!")
+                return
         self.second_process(self.cv_image_rect)
 
 
@@ -784,7 +897,7 @@ class TurtleController:
             return False
         # print("Obstacles left front right ", self.obs_left, self.obs_front, self.obs_right)
         
-        MARGIN = 4
+        MARGIN = (4, 5)[self.sim]
         current_pos = (self.occupancy_grid.shape[0]//2 - 1, 0)
         goal_pos = (self.occupancy_grid.shape[0]//2 - 1, 12)
 
@@ -794,14 +907,16 @@ class TurtleController:
 
         error = self.occupancy_grid.shape[0]//2 - (np.median(self.check_collision(current_pos, goal_pos, margin=MARGIN), axis = 0))
 
-        print("error", error)
+        print("obs error", error)
 
         if (np.isnan(error)).any():
             pass
         else:
             print("Obstacle!", error[0])
-            Kp = (0.6, 4.0)[self.sim]
-            self.ang_vel = error[0] * Kp
+            if error[0]:
+                self.cmd_speed = 0.1
+                Kp = (0.6, 0.4)[self.sim]
+                self.ang_vel = error[0] * Kp
             print("recourse:", self.ang_vel)
 
 
@@ -812,7 +927,7 @@ class TurtleController:
     
         rows, cols = self.image.shape[:2]
         
-        speed = 0.2
+        speed = 0.05
 
         # if self.step == 2 and self.sim:
         #     speed = 0.2
@@ -830,15 +945,22 @@ class TurtleController:
         if np.isnan(self.left_lane[1]):
             if np.isnan(self.right_lane[1]):
                 print("left and right nan")
-                center_of_road = self.image.shape[0]//2
+
+                center_of_road = self.error + self.image.shape[1]//2
                 speed = 0
             else:
                 # print("left nan")
-                center_of_road = self.right_lane[1] - (cols * 0.45)
+                if self.step == 2 and self.sim:
+                    center_of_road = 0
+                else:
+                    center_of_road = self.right_lane[1] - (cols * 0.45)
         else:
             if np.isnan(self.right_lane[1]):
                 # print("right nan")
-                center_of_road = self.left_lane[1] + (cols * 0.45)
+                if self.step == 2 and self.sim:
+                    center_of_road = self.image.shape[1]
+                else:
+                    center_of_road = self.left_lane[1] + (cols * 0.45)
             else:
                 center_of_road = self.left_lane[1] + (self.right_lane[1] - self.left_lane[1])*0.5
 
@@ -863,18 +985,15 @@ class TurtleController:
 
         print("center of road", center_of_road)
 
-        try:
-            self.error_pub.publish(Int32(int(self.error)))
-        except:
-            self.error_pub.publish(Int32(0))
+
 
         if self.sim:
-            Kp = -0.05 #-0.2 in si,m
+            Kp = -0.05
         else:
             Kp = -0.02
 
         self.cmd_speed =  speed #0.22
-        self.ang_vel = self.error * Kp#0.03
+        self.ang_vel = self.error * Kp
 
     #Function that warps the image
     def warp(self, img, source_points, destination_points, destn_size):
@@ -929,7 +1048,7 @@ class TurtleController:
 
         mask_frame = mask_left + mask_right
 
-        return mask_frame
+        return mask_left, mask_right
 
     #Function that defines the polygon region of interest
     def regionOfInterest(self,img, polygon):
@@ -955,60 +1074,124 @@ class TurtleController:
         masked_img = np.multiply(mask, img)
         return masked_img
 
-    def fitCurve(self,img):
+    def fitCurve(self,img, lane='left'):
+        # Calculate the histogram of the bottom half of the image
         histogram = np.sum(img[img.shape[0]//2:,:], axis=0)
         midpoint = int(histogram.shape[0]/2)
-        leftx_base = np.argmax(histogram[:midpoint])
-        rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+        
+        # Initial base positions for the left and right x-coordinates
+        if lane == 'left':
+            x_base = np.argmax(histogram[:midpoint])
+        elif lane == 'right':
+            x_base = np.argmax(histogram[midpoint:]) + midpoint
+        else:
+            raise ValueError("Invalid lane specified. Use 'left' or 'right'.")
+
+        # Parameters
         nwindows = 50
         margin = 50
         minpix = 50
         window_height = int(img.shape[0]/nwindows)
+
+        # Lane finding
+        lane_indices = []
+        x_current = x_base
         y, x = img.nonzero()
-        leftx_current = leftx_base
-        rightx_current = rightx_base
-        left_lane_indices = []
-        right_lane_indices = []
 
         for window in range(nwindows):
-            win_y_low = img.shape[0] - (window+1)*window_height
-            win_y_high = img.shape[0] - window*window_height
-            win_xleft_low = leftx_current - margin
-            win_xleft_high = leftx_current + margin
-            win_xright_low = rightx_current - margin
-            win_xright_high = rightx_current + margin
+            win_y_low = img.shape[0] - (window+1) * window_height
+            win_y_high = img.shape[0] - window * window_height
+            win_x_low = x_current - margin
+            win_x_high = x_current + margin
 
-            good_left_indices = ((y >= win_y_low) & (y < win_y_high) & (x >= win_xleft_low) & (x < win_xleft_high)).nonzero()[0]
-            good_right_indices  = ((y >= win_y_low) & (y < win_y_high) & (x >= win_xright_low) & (x < win_xright_high)).nonzero()[0]
-            left_lane_indices.append(good_left_indices)
-            right_lane_indices.append(good_right_indices)
-            if len(good_left_indices) > minpix:
-                leftx_current = int(np.mean(x[good_left_indices]))
-            if len(good_right_indices) > minpix:
-                rightx_current = int(np.mean(x[good_right_indices]))
+            good_indices = ((y >= win_y_low) & (y < win_y_high) & 
+                            (x >= win_x_low) & (x < win_x_high)).nonzero()[0]
+            lane_indices.append(good_indices)
 
-        left_lane_indices = np.concatenate(left_lane_indices)
-        right_lane_indices = np.concatenate(right_lane_indices)
-        leftx = x[left_lane_indices]
-        lefty = y[left_lane_indices]
-        rightx = x[right_lane_indices]
-        righty = y[right_lane_indices]
+            if len(good_indices) > minpix:
+                x_current = int(np.mean(x[good_indices]))
+
+        lane_indices = np.concatenate(lane_indices)
+        lanex = x[lane_indices]
+        laney = y[lane_indices]
+
+        print(lane, len(lane_indices))
+        
+        if len(lane_indices) < 3000:
+            print("NOT ENOUGH POINTSSS", len(lane_indices))
+            return None, None
+
+
         try:
-            left_fit = np.polyfit(lefty, leftx, 2)
-            right_fit = np.polyfit(righty, rightx, 2)
+            fit = np.polyfit(laney, lanex, 2)
         except:
             return None, None
 
-        return left_fit, right_fit
+        if lane == 'left':
+            return fit, None
+        else:
+            return None, fit
 
-    #Function that give pixel location of points through which the curves of detected lanes passes
-    def findPoints(self,img_shape, left_fit, right_fit):
+
+        # try:
+        #     left_fit = np.polyfit(lefty, leftx, 2)
+        #     print("left")
+        #     return left_fit, None
+        # except:
+        #     try:
+        #         right_fit = np.polyfit(righty, rightx, 2)
+        #         print("right")
+        #         return None, right_fit
+        #     except:
+        #         print("None")
+        #         return None, None
+
+
+    def estimate_missing_lane(self, detected_fit, lane_side, lane_width_pixels):
+        """
+        Estimate the polynomial of the missing lane by shifting the detected lane's polynomial.
+        
+        :param detected_fit: Polynomial coefficients (a, b, c) of the detected lane
+        :param lane_side: 'left' if the left lane is detected, 'right' otherwise
+        :param lane_width_pixels: Width of the lane in pixels
+        :return: Polynomial coefficients of the estimated missing lane
+        """
+        a, b, c = detected_fit
+        if lane_side == 'left':
+            # Estimate the right lane by adding the lane width to the constant term of the polynomial
+            missing_lane_fit = (a, b, c + lane_width_pixels)
+        elif lane_side == 'right':
+            # Estimate the left lane by subtracting the lane width
+            missing_lane_fit = (a, b, c - lane_width_pixels)
+        else:
+            raise ValueError("lane_side must be 'left' or 'right'")
+        
+        return missing_lane_fit
+
+    def findPoints(self, img_shape, left_fit=None, right_fit=None):
         ploty = np.linspace(0, img_shape[0]-1, img_shape[0])
-        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
-        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
-        pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+
+        LANE_WIDTH_PIXELS = (350, 600)[self.step == 2]
+        
+        if left_fit is not None and right_fit is None:
+            right_fit = self.estimate_missing_lane(left_fit, 'left', LANE_WIDTH_PIXELS)
+        elif right_fit is not None and left_fit is None:
+            left_fit = self.estimate_missing_lane(right_fit, 'right', LANE_WIDTH_PIXELS)
+        
+        if left_fit is not None:
+            left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+            pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+        else:
+            pts_left = None
+        
+        if right_fit is not None:
+            right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+            pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+        else:
+            pts_right = None
+        
         return pts_left, pts_right
+
 
     #Function that fills the space between the detected lane curves
     def fillCurves(self, img_shape, pts_left, pts_right):
@@ -1033,10 +1216,8 @@ class TurtleController:
 
 
     def second_process(self, image):
-        processed_img = self.preprocessing(image)
-
-
-        height, width = processed_img.shape
+    
+        height, width, _ = image.shape
 
         # polygon = [(int(width*0.05), int(height)), (int(width*0.3), int(height*0.7)), (int(width*0.7), int(height*0.7)), (int(0.95*width), int(height))]
         # polygon = [(int(0), int(height)), (int(1), int(130)), (int(width-1), int(130)), (int(width), int(height))]
@@ -1050,25 +1231,43 @@ class TurtleController:
             destination_points = np.float32([[0,0], [500,0], [0,600],[500, 600]])
 
         warped_img_size = (800, 450)
-        warped_img = self.warp(processed_img, source_points, destination_points, warped_img_size)        
+        warped_img = self.warp(image, source_points, destination_points, warped_img_size)  
+
+        left, right = self.preprocessing(warped_img)
+
+
     
         kernel = np.ones((41,41), np.uint8)
-        opening = cv.morphologyEx(warped_img, cv.MORPH_CLOSE, kernel)
+        opening_left = cv.morphologyEx(left, cv.MORPH_CLOSE, kernel)
+        opening_right = cv.morphologyEx(right, cv.MORPH_CLOSE, kernel)
+
 
 
 
         warped_img_shape = (warped_img.shape)
 
-        left_fit, right_fit = self.fitCurve(opening)
-        if left_fit is None or right_fit is None:
+        left_fit, _ = self.fitCurve(opening_left, lane="left")
+        _, right_fit = self.fitCurve(opening_right, lane="right")
+
+        if left_fit is None and right_fit is None:
+            print("no fit")
             return
+        
+        print("PTS RIGHT ", right_fit)
+
         pts_left, pts_right = self.findPoints(warped_img_shape, left_fit, right_fit)
+
+
         fill_curves = self.fillCurves(warped_img_shape, pts_left, pts_right)
 
         unwarped_fill_curves = self.unwarp(fill_curves, source_points, destination_points, (width, height))
         window1 = cv.addWeighted(image, 1, unwarped_fill_curves, 1, 0)
 
         road = self.warp(window1, source_points, destination_points, warped_img_size)
+
+
+        image_message = self.bridge.cv2_to_imgmsg(fill_curves, "passthrough")
+        self.image_pub.publish(image_message)
 
 
         road_mask = cv.inRange(road, np.array([250,0,250]), np.array([255,20,255]))
@@ -1086,30 +1285,47 @@ class TurtleController:
         road = cv.cvtColor(road, cv.COLOR_BGR2GRAY)
         _,road = cv.threshold(road,40,255,cv.THRESH_BINARY)
 
-        # kernel = np.ones(shape=[2, 2])
-        # self.occupancy_grid2 = signal.convolve2d(
-        #     road.astype("int"), kernel.astype("int"), boundary="symm", mode="same"
-        # )
-        # self.occupancy_grid2 = np.clip(self.occupancy_grid2, 0, 50)
+        # # self.publish_occupancy_grid()
+
+        # self.old_radius = self.avg_radius
+        # left_radius, right_radius, self.avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
+
+        # avg_radius = self.avg_radius
+
+        # if abs(self.old_radius - avg_radius) > 5000 and abs(avg_radius)<5000:
+        #     rospy.logwarn(f"REJECTED {(self.old_radius - avg_radius)/avg_radius}")
+        #     self.avg_radius = self.old_radius
+        # else:
+        #     self.road = road
+
+            
+        kernel = np.ones(shape=[2, 2])
+        self.occupancy_grid2 = signal.convolve2d(
+            road.astype("int"), kernel.astype("int"), boundary="symm", mode="same"
+        )
+        self.occupancy_grid2 = np.clip(self.occupancy_grid2, 0, 50)
+
+        self.merge_occup_grids()
 
 
-        # self.merge_occup_grids()
+        # print("AVG RADIUS: ", avg_radius)
+        
+
+        
 
 
-        left_radius, right_radius, avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
 
-
-        if abs(left_radius)>5000 and abs(right_radius)>5000:
-            # print("road is straight")
-            pass
-            # self.error = 0
-        elif abs(avg_radius)<5000:
-            if avg_radius < 0:
-                pass
-                # print("Road is turning right ", avg_radius)
-            else:
-                pass
-                # print("Road is turning left ", avg_radius)
+        # if abs(left_radius)>5000 and abs(right_radius)>5000:
+        #     print("road is straight")
+        #     pass
+        #     # self.error = 0
+        # elif abs(avg_radius)<5000:
+        #     if avg_radius < 0:
+        #         pass
+        #         print("Road is turning right ", avg_radius)
+        #     else:
+        #         pass
+        #         print("Road is turning left ", avg_radius)
             # self.error = (5000. - avg_radius)/5000.
 
         # self.cmd_speed =  0.22 #0.22
@@ -1119,7 +1335,7 @@ class TurtleController:
         # print("Heading error ", self.heading_error[0])
         # print("Crosstrack error ", self.crosstrack_error[0])
 
-
+        
         
         pass
 
@@ -1127,22 +1343,35 @@ class TurtleController:
     def merge_occup_grids(self):
         
 
-        # print("shp", self.occupancy_grid2.shape)
-        # print("shp", self.occupancy_grid.shape)
-
-
         lidar_occup = np.copy(self.occupancy_grid)
 
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
 
-        # if self.sim:
-        #     pass
-        #     # lidar_occup = lidar_occup[7:, 2:-8]
-        # else:
-        #     pass
-        #     rospy.logwarn("IMPLEMENT THIS")
 
-        self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
+        if self.sim and self.step == 2:
+
+            lidar_occup = lidar_occup[72:, 55:-55]
+            # Create a structuring element (disk) corresponding to half the robot's width
+            selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
+
+            # Dilate the obstacle map
+            inflated_obstacles = dilation(lidar_occup, selem)
+            lidar_occup = np.where(inflated_obstacles, 100, 0)
+
+            self.occupancy_grid2 = np.where(self.occupancy_grid2 >0 ,0, 100)
+
+            self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
+
+            self.occupancy_grid2 = np.where(self.occupancy_grid2 >0 ,0, 100)
+            
+            print(self.occupancy_grid2.shape)
+
+        else:
+            self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
+
+            
+
+       
 
         # self.publish_occupancy_grid()
 
@@ -1293,22 +1522,23 @@ class TurtleController:
             print("AREA STEPLINE  ", stepline_area)
 
             lower = (15000,2400)[self.sim]
-            upper = (30000,3200)[self.sim]
+            upper = (30000,3200)[self.sim] 
+
+            last_detection_threshold = (6,14)[self.sim and self.step == 2]
 
 
-            if (stepline_area > lower and stepline_area < upper):
-                
-                if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < 6):
-                    print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
-                    pass
-                else:
-                    self.detect_stepline = True
-            else:
-                if self.detect_stepline:
-                    rospy.logwarn(f"STEP + 1")
-                    self.step +=1
-                    self.last_detection = rospy.Time.now()
-                    self.detect_stepline = False
+            # if (stepline_area > lower and stepline_area < upper):
+            #     if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < last_detection_threshold):
+            #         print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
+            #         pass
+            #     else:
+            #         self.detect_stepline = True
+            # else:
+            #     if self.detect_stepline:
+            #         rospy.logwarn(f"STEP + 1")
+            #         self.step +=1
+            #         self.last_detection = rospy.Time.now()
+            #         self.detect_stepline = False
 
 
             if self.sim:
@@ -1363,8 +1593,7 @@ class TurtleController:
             # cv.circle(self.image, center_road, radius, color2, 5)
 
 
-            image_message = self.bridge.cv2_to_imgmsg(mask_right, "passthrough")
-            self.image_pub.publish(image_message)
+            
         else:
             pass
 
