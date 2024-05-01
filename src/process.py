@@ -644,7 +644,7 @@ class TurtleController:
         print("ang vel, speed", self.ang_vel, self.cmd_speed)
 
         # speed pub
-        self.cmd_vel_pub.publish(cmd_twist)
+        # self.cmd_vel_pub.publish(cmd_twist)
 
 
     def lidarCB(self, data:LaserScan) :
