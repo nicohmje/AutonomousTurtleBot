@@ -54,31 +54,17 @@ class LidarProcess:
         self.min_angle_rad          = self.min_angle_deg * np.pi / 180 # in radians
         self.max_angle_rad          = self.max_angle_deg * np.pi / 180 # in radians
 
+        self.CELLS_PER_METER = rospy.get_param("/occup_cellspermeter", default=50)
+        self.IS_FREE = rospy.get_param("/occup_isfree", default=0)
+        self.IS_OCCUPIED = rospy.get_param("/occup_osoccupied", default=100)
+
 
         if rospy.get_param('/use_sim_time', default=False):
             self.LOOKAHEAD = 2 #meters
-            self.CELLS_PER_METER = 50
-            self.IS_FREE = 0
-            self.IS_OCCUPIED = 100
             self.grid_height = int(self.LOOKAHEAD * self.CELLS_PER_METER)
             self.grid_width = int(3 * self.CELLS_PER_METER)
         else:
-
-
-        #occupancy grid:
-
-        # 0.7
-        # 50
-        # 0 
-        # 100 
-        # /
-        # 1
-
-
             self.LOOKAHEAD = 1 #meters
-            self.CELLS_PER_METER = 50
-            self.IS_FREE = 0
-            self.IS_OCCUPIED = 100
             self.grid_height = int(self.LOOKAHEAD * self.CELLS_PER_METER)
             self.grid_width = int(2 * self.CELLS_PER_METER)
 
