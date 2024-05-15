@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from std_msgs.msg import Int32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
-3
+
 class Nodes:
     def __init__(self, x,y):
         self.x = x
@@ -33,18 +33,14 @@ class Nodes:
         self.children = []
 
 class RRTStarPlanning:
-    def __init__(self, stepSize=4, radius=20, max_iters=600, cpm=50, is_occupied=0):
+    def __init__(self, step=4, radius=20, max_iters=600):
         self.img = None
         self.radius = radius
-        self.stepSize= stepSize
+        self.stepSize= step
         self.max_iters = max_iters
-        self.cpm = cpm
-        self.occup = is_occupied
-        self.busy = False
+
 
     def set_image(self, img):
-        if self.busy:
-            return
         self.img = img
         self.start = (self.img.shape[0]-1, img.shape[1]//2)
 
@@ -56,43 +52,41 @@ class RRTStarPlanning:
         return self.RRT()
     
     def rel_to_grid(self, rel):
-        x = (self.img.shape[0]-1) - (rel[0]*self.cpm)
-        y = (self.img.shape[1]//2) - (rel[1]*self.cpm)
+        x = (self.img.shape[0]-1) - (rel[0]*50)
+        y = (self.img.shape[1]//2) - (rel[1]*50)
         return (int(x),int(y))
     
     def grid_to_rel(self, grid):
-        x = (self.img.shape[0]-1 - grid[0])/self.cpm
-        y = ((self.img.shape[1]//2) - grid[1])/self.cpm
+        x = (self.img.shape[0]-1 - grid[0])/50.
+        y = ((self.img.shape[1]//2) - grid[1])/50.
         return (x, y)
     
     def collision(self, x1, y1, x2, y2):
         # Switched from bresenham to skimage.draw.line
         discrete_line = (zip(*line(x1,y1,x2,y2)))
         for point in discrete_line:
-            try:
-                if self.img[point[0], point[1]] == self.occup:  # Assuming obstacle is white
-                    return True
-            except:
-                continue
+            if self.img[point[0], point[1]] == 0:  # Assuming obstacle is white
+                return True
         return False
 
+    # check the  collision with obstacle and trim
     def check_collision(self, x1,y1,x2,y2):
         hx,hy=self.img.shape
         if y1<0 or y1>hy or x1<0 or x1>hx:
             directCon = False
             nodeCon = False
         else:
+            # check direct connection
             if self.collision(x1,y1,self.end[0],self.end[1]):
                 directCon = False
             else:
                 dst, _ = self.dist_and_angle(x1,y1,self.end[0],self.end[1])
-
-                # Threshold distance from last point to goal (optional)
                 if dst > self.stepSize*2:
                     directCon = True
                 else:
-                    directCon= True
+                    directCon=True
 
+            # check connection between two nodes
             if self.collision(x1,y1,x2,y2):
                 nodeCon = False
             else:
@@ -106,12 +100,11 @@ class RRTStarPlanning:
         angle = math.atan2(y2-y1, x2-x1)
         return(dist,angle)
     
-    # b/w two nodes (im lazy)
+    # b/w two nodes
     def distance(self, n1, n2):
         dist = math.sqrt( ((n2.x-n1.x)**2)+((n2.y-n1.y)**2) )
         return dist
     
-
     def near_nodes(self, new_node):
         return [node for node in self.node_list if self.distance(node, new_node) < self.radius]
 
@@ -123,20 +116,17 @@ class RRTStarPlanning:
             n = self.node_list[i]
             dst = self.distance(n, next_node)
             if dst > self.radius:
-                print("out of radius")
                 continue
             cost = n.cost + dst
             if cost<best_cost and not self.collision(n.x, n.y, next_node.x, next_node.y):
                 best_cost = cost
                 best_node = i
-            else:
-                pass
-                # print("cost", cost, best_cost)
         return best_node, best_cost
     
     def rewire(self, new_node, near_nodes):
         for node in near_nodes:
             cost_via_new_node = new_node.cost + self.distance(new_node, node)
+            # print("new, old cost", cost_via_new_node, node.cost)
             if cost_via_new_node < node.cost and not self.collision(new_node.x , new_node.y, node.x, node.y):
                 if node.parent:
                     node.parent.children.remove(node)
@@ -161,18 +151,17 @@ class RRTStarPlanning:
             temp_dist.append(dist)
         return temp_dist.index(min(temp_dist))
 
-    # generate a random point in the occup grid space
+    # generate a random point in the image space
     def rnd_point(self, h,l):
-        new_y = random.randint(0, h-1)
-        new_x = random.randint(0, l-1)
+        new_y = random.randint(0, h)
+        new_x = random.randint(0, l)
         return (new_x,new_y)
 
 
     def RRT(self):
-
         h,l= self.img.shape # dim of the loaded image
 
-        if self.img[self.start[0], self.start[1]] == self.occup:
+        if self.img[self.start[0], self.start[1]] == 0:
             return [None, None]
         
         # if self.img[self.end[0], self.end[1]] == 0:
@@ -180,7 +169,6 @@ class RRTStarPlanning:
         #     return [None, None]
 
         if not self.collision(self.start[0], self.start[1], self.end[0], self.end[1]):
-            #Just go straight to the end
             return [self.start, self.end]
                
         self.node_list[0] = Nodes(self.start[0],self.start[1])
@@ -188,17 +176,10 @@ class RRTStarPlanning:
         self.node_list[0].cost = 0
 
         i=1
-        loop = 0
-        self.busy = True
         pathFound = False
-        while pathFound==False and (not rospy.is_shutdown()):
+        while pathFound==False:
             # print(f"iter {i}")
             if i > self.max_iters:
-                self.busy = False
-                return [None, None]
-
-            if loop > 40:
-                # print("MAX LOOP")
                 return [None, None]
             
             nx,ny = self.rnd_point(h,l)
@@ -212,15 +193,11 @@ class RRTStarPlanning:
             ty=int(nearest_y + self.stepSize*np.sin(theta))
             
             if ty<0 or ty>self.img.shape[1]-1 or tx<0 or tx>self.img.shape[0]-1:
-                loop += 1
-                # print("bounds")
                 continue
 
             nearest_ind, new_cost = self.best_parent(tx, ty)
 
             if nearest_ind is None:
-                # print("no best parent")
-                loop += 1
                 continue
                 
             #check direct connection
@@ -236,22 +213,18 @@ class RRTStarPlanning:
                 self.node_list[nearest_ind].children.append(self.node_list[i])
                 self.node_list[i].cost = new_cost
 
-                # self.rewire(self.node_list[i], self.near_nodes(self.node_list[i]))
+                self.rewire(self.node_list[i], self.near_nodes(self.node_list[i]))
 
-                print(f"Path has been found in {i} iterations")
+                # print(f"Path has been found in {i} iterations")
 
                 node = self.node_list[i]
                 pos = (node.x, node.y)
-                checkpoints = [pos]
-                print("pos", pos)
+                checkpoints = [self.end, pos]
                 while True:
                     pos, node = self.get_parent_coord(node)
-                    print("pos", pos)
                     checkpoints.append(pos)
-                    if node is None or pos == self.start:
+                    if node is None:
                         break
-                # checkpoints.reverse()
-                self.busy = False
                 return checkpoints
 
             elif nodeCon:
@@ -264,12 +237,9 @@ class RRTStarPlanning:
 
                 self.rewire(self.node_list[i], self.near_nodes(self.node_list[i]))
                 i += 1
-                loop = 0
                 continue
 
             else:
-                print("no cin")
-                loop += 1
                 continue
     
     def get_parent_coord(self,node):
@@ -283,11 +253,14 @@ class RRTStarPlanning:
 
 
 class Bottle:
-    def __init__(self, index, position=None, gate=None, colour=None):
+    def __init__(self, index, position=None, gate=None, color=None, shape=None):
         self.index = index
         self.position = position
         self.gate = gate
-        self.colour = colour
+        self.color = color
+        self.last_iter_update = 0
+        self.shape = shape
+        self.dx = 0
 
     def get_position(self):
         return (self.position[0], self.position[1])
@@ -295,11 +268,11 @@ class Bottle:
     def set_position(self, position:tuple):
         self.position = position
 
-    def set_colour(self, colour:int):
-        self.colour = colour
+    def set_color(self, color):
+        self.color = color
 
-    def get_colour(self):
-        return self.colour
+    def get_color(self):
+        return self.color
 
     def set_gate(self, gate:int):
         self.gate = gate
@@ -313,7 +286,7 @@ class Bottle:
 
 
 class Gate:
-    def __init__(self, center_position=None, bottle_index1=None, bottle_index2=None, colour=None):
+    def __init__(self, center_position=None, bottle_index1=None, bottle_index2=None, color=None):
         self.center_position = center_position
         self.bottle_index1 = bottle_index1
         self.bottle_index2 = bottle_index2
@@ -322,7 +295,7 @@ class Gate:
         self.offset_point2 = None
 
         self.confirmed = False
-        self.colour = colour
+        self.color = color
 
         # print("New gate alert! :", self.bottle_index1,self.bottle_index2)
 
@@ -332,14 +305,14 @@ class Gate:
     def get_center_pos(self):
         return self.center_position
     
-    def set_colour(self, colour:int, bottles:list):
-        bottles[self.bottle_index1].set_colour(colour)
-        bottles[self.bottle_index2].set_colour(colour)
+    def set_colour(self, color, bottles):
+        bottles[self.bottle_index1].set_color(color)
+        bottles[self.bottle_index2].set_color(color)
 
-        self.colour = colour
+        self.color = color
     
-    def get_colour(self):
-        return self.colour
+    def get_color(self):
+        return self.color
     
     def get_bottles_indices(self):
         return self.bottle_index1, self.bottle_index2
@@ -348,7 +321,7 @@ class Gate:
     def get_offset_points(self):
         return self.offset_point1, self.offset_point2
 
-    def update(self, bottles:list):
+    def update(self, bottles):
         c1 = bottles[self.bottle_index1].get_position()
         c2 = bottles[self.bottle_index2].get_position()
 
@@ -356,7 +329,7 @@ class Gate:
         perp_vec = np.array([-vec[1], vec[0]])
         unit_perp_vec = perp_vec / np.linalg.norm(perp_vec)
 
-        offset = 0.24 #Self.sim 0.24
+        offset = 0.24 #Self.sim 12
 
         cX = np.mean([c1[0],c2[0]])
         cY = np.mean([c1[1],c2[1]])
@@ -368,29 +341,26 @@ class Gate:
         
 
 
-class TurtleController:
 
+class TurtleController:
     def __init__(self):
-            
             self.image_pub = rospy.Publisher("/masked_frame", Image, queue_size=1)
             self.error_pub = rospy.Publisher("/error", Int32, queue_size=1)
             self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
             self.occupancy_grid_pub = rospy.Publisher('occupancy_grid_road', OccupancyGrid, queue_size=4)
             
 
+
             rospy.Subscriber("/param_change_alert", Bool, self.get_params)
 
             self.laser_scan = None
-            self.cv_image = None
-            self.image = None
-            self.cv_image_rect = None
+
             self.theta = None
             self.pos = None
 
-
             self.detect_stepline = False
 
-            self.step = 1
+            self.step = 0
 
 
             self.ang_vel = 0
@@ -398,7 +368,13 @@ class TurtleController:
 
             self.error = 0
 
+
+            self.min_angle_deg = -90
+
             self.avg_radius = 0
+
+
+            self.max_angle_deg = 90
 
             self.occupancy_grid = None
             self.occupancy_grid2 = None
@@ -407,14 +383,20 @@ class TurtleController:
             self.right_lane = [np.nan, np.nan]
 
 
-            self.buffer = 0
+            self.LOOKAHEAD = 1 #meters
+            self.CELLS_PER_METER = 50
+            self.IS_FREE = 0
+            self.IS_OCCUPIED = 100
 
             self.current_index = 0
 
             self.inside_tunnel = False
 
-            
-            # self.order = [1,0,2] #0 blue, 1 green, 2 yellow
+            self.cv_image = None
+            self.image = None
+            self.cv_image_rect = None
+
+            self.order = [1,0,2] #0 blue, 1 green, 2 yellow
 
 
             self.bridge = CvBridge()
@@ -422,17 +404,18 @@ class TurtleController:
             self.last_detection = None
             self.get_params()
 
-            self.pathplanner = RRTStarPlanning(stepSize=self.rrt_step, radius=self.rrt_radius, max_iters=self.rrt_maxiters, cpm=self.CELLS_PER_METER, is_occupied=self.IS_FREE) 
-
+            rospy.logwarn("CHANGE THIS")
+            self.pathplanner = RRTStarPlanning(step=6, radius=60, max_iters=400) #CHANGE THISSSSS
+            # self.pathplanner = RRTPlanning(6)
             self.bottles = []
             self.gates = []
 
-            self.colour_to_gate = {0:None, 1:None, 2:None}
+            self.color_to_gate = {0:None, 1:None, 2:None}
 
-            # self.same_bottle_threshold = (6,0.12)[self.sim]
+            self.same_bottle_threshold = (6,0.12)[self.sim]
             self.confirmed = False
 
-            self.found_colours = False
+            self.found_colors = False
 
             self.state = 0 #0 exploring, 1 transiting, 2 crossing 
             self.target_gate = None
@@ -506,32 +489,31 @@ class TurtleController:
         # self.occupancy_grid2 = inflated_obstacles
         if self.occupancy_grid2 is None:
             return
-        self.pathplanner.max_iters = 50
-        self.pathplanner.stepSize = 4
+
         self.pathplanner.set_image(self.occupancy_grid2)
         self.publish_occupancy_grid()
 
-
-        goal = [1.71,1.6]
+        goal = [1.4,1.7]
 
         distance_to_goal = np.linalg.norm(np.array((goal[0] - self.pos[0], goal[1]-self.pos[1])))
 
         angle_to_goal = (math.atan2(goal[1] - self.pos[1], goal[0] - self.pos[0])) - self.theta 
 
+
         relative_pos = (math.cos(angle_to_goal)*distance_to_goal, math.sin(angle_to_goal)*distance_to_goal)
 
 
-        goal_grid_pos = self.pathplanner.rel_to_grid((relative_pos))
+        goal_grid_pos = self.pathplanner.rel_to_grid(relative_pos)
         start_grid_pos = self.pathplanner.rel_to_grid((0,0))
 
-        print("start, goal", start_grid_pos, goal_grid_pos)
+        print(start_grid_pos, goal_grid_pos)
 
-        cells = list(self.traverse_grid(goal_grid_pos, start_grid_pos))
+        cells = self.traverse_grid(goal_grid_pos, start_grid_pos)
         
         if cells[-1] == start_grid_pos:
             cells.reverse()
 
-        closest_cell = goal_grid_pos
+        closest_cell = None
         s1, s2 = self.occupancy_grid2.shape
 
         for i in cells:
@@ -541,21 +523,19 @@ class TurtleController:
             #     closest_cell = i
             if self.occupancy_grid2[i[0], i[1]] == 100:
                 closest_cell = i
-        
+
+
+
         goals = self.pathplanner.plan(closest_cell)
 
-        print("planner result: ", goals)
+        print("GOAAALS ", goals)
 
-        self.cmd_speed = 0.2
+        self.cmd_speed = 0.1
 
         target = goals[1]
 
-        print("Target", target)
-
         if target is None:
-            print("Not found")
             local_waypoint = np.array((10, 0))
-            # self.cmd_speed = 0.0
         else:
             local_waypoint = np.array((self.occupancy_grid2.shape[0] - target[0], target[1] - 0.5 * self.occupancy_grid2.shape[1]))
 
@@ -564,13 +544,18 @@ class TurtleController:
 
         print("DISTANDHEADINIG", distance, heading)
 
+        for i in goals[1:]:
+            try:
+                self.occupancy_grid2[int(i[0]),int(i[1])] = 0
+            except:
+                pass
+
         Kp = (-1.5, -1.5)[self.sim]
 
         if abs(heading) > (0.3,0.6)[self.sim]:
-            self.cmd_speed = 0.05
+            self.cmd_speed = 0.
         self.ang_vel = heading * Kp
         
-        print("jead", self.cmd_speed)
 
 
 
@@ -590,9 +575,11 @@ class TurtleController:
         self.grid_width = msg.info.height
         self.CELL_Y_OFFSET = (self.grid_width // 2) - 1
 
+        print("OccupCB", self.occupancy_grid.shape)
+
         if self.step == 5:
-            # if self.current_index == 3:
-            #     rospy.signal_shutdown("Finished all challenges.")
+            if self.current_index == 3:
+                rospy.signal_shutdown("Finished all challenges.")
             self.last_challenge()
 
 
@@ -603,31 +590,24 @@ class TurtleController:
 
         print("Step:", self.step)
         if not self.step:
-            self.cmd_speed = self.max_speed
+            self.cmd_speed = 0.2
             self.ang_vel = 0
 
         if self.step <= 1:
-            if self.image is None or self.laser_scan is None:
+            if self.cv_image is None:
                 rospy.logwarn("No image received!")
                 pass
             else:
                 #pass
-                if np.mean(self.laser_scan.ranges[87:93]) < 0.2:
-                    print("JOHMN CENA")
-                    self.cmd_speed = 0
-                    self.ang_vel = 0
-                    pass 
-                else:
-                    print(np.mean(self.laser_scan.ranges[87:93]))
-                    self.lane_assist_controller()
+                self.lane_assist_controller()
 
         elif self.step == 2:
             if self.laser_scan is None:
                 rospy.logwarn("No LiDAR data received!")
             else:
-                self.challenge_2()
-                # self.lane_assist_controller()
-                # self.obstacle_detection()
+                # self.challenge_2()
+                self.lane_assist_controller()
+                self.obstacle_detection
         
         elif self.step == 3:
             if self.laser_scan is None:
@@ -636,7 +616,7 @@ class TurtleController:
             else:
                 # self.lane_assist_controller()
                 self.lidar_only()
-                # self.obstacle_detection()
+                self.obstacle_detection()
                 pass
 
         elif self.step == 4:
@@ -644,13 +624,8 @@ class TurtleController:
                 rospy.logwarn("No image received!")
                 pass
             else:
-                if self.buffer <4:
-                    self.cmd_speed = 0.1
-                    self.ang_vel = 0.0
-                    self.buffer += 1
-                else:
                 #pass
-                    self.lane_assist_controller()
+                self.lane_assist_controller()
 
         elif self.step == 5:
             if self.cv_image_rect is None:
@@ -664,12 +639,11 @@ class TurtleController:
 
         if self.sim:
             pass
-            self.ang_vel = min(self.ang_vel_clip, max(-self.ang_vel_clip, self.ang_vel))
+            self.ang_vel = min(1.6, max(-1.6, self.ang_vel))
         else:
             pass
-            # self.ang_vel = min(self.ang_vel_clip, max(-self.ang_vel_clip, self.ang_vel))
-
-
+            # self.ang_vel = min(1.3, max(-1.3, self.ang_vel))
+            # self.ang_vel = 0.1 * self.ang_vel
         cmd_twist.angular.z = self.ang_vel
 
         # print("ang vel, speed", self.ang_vel, self.cmd_speed)
@@ -704,7 +678,7 @@ class TurtleController:
 
         print(left_ranges)
 
-        dst_left = np.mean(left_ranges[(np.where(left_ranges > 0))]) 
+        dst_left = np.mean(left_ranges[(np.where(left_ranges > 0))])
         dst_right = np.mean(right_ranges[(np.where(right_ranges > 0))])
         dst_front = np.mean(front_ranges[(np.where(front_ranges > 0))])
 
@@ -715,9 +689,10 @@ class TurtleController:
 
         print("left ", dst_left)
         print("right ", dst_right)
-        print("inside tunnel ", self.inside_tunnel_thresh)
-        
-        if dst_left < self.inside_tunnel_thresh and dst_right < self.inside_tunnel_thresh and self.inside_tunnel == False:
+
+        inside_tunnel_threshold = (0.3, 0.55)[self.sim]
+
+        if dst_left < inside_tunnel_threshold and dst_right < inside_tunnel_threshold and self.inside_tunnel == False:
             print("entered tunnel")
             self.inside_tunnel = True
             dir = Kp * ((dst_left-dst_right)/(0.7*dst_front))
@@ -742,7 +717,7 @@ class TurtleController:
         else:
             self.ang_vel = 0
 
-        self.cmd_speed = 0.15
+        self.cmd_speed = 0.075
 
 
     def traverse_grid(self, start, end):
@@ -750,57 +725,65 @@ class TurtleController:
         Bresenham's line algorithm for fast voxel traversal
 
         CREDIT TO: Rogue Basin
-        http://www.roguebasin.com/index.php/Bresenham%27s_Line_Algorithm
+        CODE TAKEN FROM: http://www.roguebasin.com/index.php/Bresenham%27s_Line_Algorithm
         """
-        x1,y1 = start
+        # Setup initial conditions
+        x1, y1 = start
         x2, y2 = end
+        dx = x2 - x1
+        dy = y2 - y1
 
-        return (zip(*line(x1,y1,x2,y2)))
-    
-        # # Setup initial conditions
-        # x1, y1 = start
-        # x2, y2 = end
-        # dx = x2 - x1
-        # dy = y2 - y1
+        # Determine how steep the line is
+        is_steep = abs(dy) > abs(dx)
 
-        # # Determine how steep the line is
-        # is_steep = abs(dy) > abs(dx)
+        # Rotate line
+        if is_steep:
+            x1, y1 = y1, x1
+            x2, y2 = y2, x2
 
-        # # Rotate line
-        # if is_steep:
-        #     x1, y1 = y1, x1
-        #     x2, y2 = y2, x2
+        # Swap start and end points if necessary and store swap state
+        if x1 > x2:
+            x1, x2 = x2, x1
+            y1, y2 = y2, y1
 
-        # # Swap start and end points if necessary and store swap state
-        # if x1 > x2:
-        #     x1, x2 = x2, x1
-        #     y1, y2 = y2, y1
+        # Recalculate differentials
+        dx = x2 - x1
+        dy = y2 - y1
 
-        # # Recalculate differentials
-        # dx = x2 - x1
-        # dy = y2 - y1
+        # Calculate error
+        error = int(dx / 2.0)
+        ystep = 1 if y1 < y2 else -1
 
-        # # Calculate error
-        # error = int(dx / 2.0)
-        # ystep = 1 if y1 < y2 else -1
-
-        # # Iterate over bounding box generating points between start and end
-        # y = y1
-        # points = []
-        # for x in range(x1, x2 + 1):
-        #     coord = (y, x) if is_steep else (x, y)
-        #     points.append(coord)
-        #     error -= abs(dy)
-        #     if error < 0:
-        #         y += ystep
-        #         error += dx
-        # return points
+        # Iterate over bounding box generating points between start and end
+        y = y1
+        points = []
+        for x in range(x1, x2 + 1):
+            coord = (y, x) if is_steep else (x, y)
+            points.append(coord)
+            error -= abs(dy)
+            if error < 0:
+                y += ystep
+                error += dx
+        return points
     
     
     def check_collision(self, cell_a, cell_b, margin=0):
         """
         Checks whether the path between two cells
         in the occupancy grid is collision free.
+
+        The margin is done by checking if adjacent cells are also free.
+
+        One of the issues is that if the starting cell is next to a wall, then it already considers there to be a collision.
+        See check_collision_loose
+
+
+        Args:
+            cell_a (i, j): index of cell a in occupancy grid
+            cell_b (i, j): index of cell b in occupancy grid
+            margin (int): margin of safety around the path
+        Returns:
+            collision (bool): whether path between two cells would cause collision
         """ 
         obstacles = []
 
@@ -826,117 +809,76 @@ class TurtleController:
 
     def get_params(self, event=True):
         rospy.loginfo("Updating the parameters")
+
         try:
-            try:
-                self.sim = rospy.get_param("use_sim_time")
-            except:
-                self.sim = False
+            self.sim = rospy.get_param("use_sim_time")
+        except:
+            self.sim = False
+
+        # Yellow Color Gains
+        self.left_H_l = rospy.get_param("/left_H_l", default=77)
+        self.left_S_l = rospy.get_param("/left_S_l", default=32)
+        self.left_V_l = rospy.get_param("/left_V_l", default=76)
+
+        self.left_H_u = rospy.get_param("/left_H_u", default=102)
+        self.left_S_u = rospy.get_param("/left_S_u", default=180)
+        self.left_V_u = rospy.get_param("/left_V_u", default=132)
+
+        # White Color Gains
+        self.right_H_l = rospy.get_param("/right_H_l", default=100)
+        self.right_S_l = rospy.get_param("/right_S_l", default=74)
+        self.right_V_l = rospy.get_param("/right_V_l", default=123)
+
+        self.right_H_u = rospy.get_param("/right_H_u", default=120)
+        self.right_S_u = rospy.get_param("/right_S_u", default=255)
+        self.right_V_u = rospy.get_param("/right_V_u", default=255)
+
+        # Red Color Gains (Assuming two ranges for red)
+        self.stepline1_H_l = rospy.get_param("/stepline1_H_l", default=0)
+        self.stepline1_S_l = rospy.get_param("/stepline1_S_l", default=0)
+        self.stepline1_V_l = rospy.get_param("/stepline1_V_l", default=0)
+
+        self.stepline1_H_u = rospy.get_param("/stepline1_H_u", default=10)
+        self.stepline1_S_u = rospy.get_param("/stepline1_S_u", default=255)
+        self.stepline1_V_u = rospy.get_param("/stepline1_V_u", default=255)
+
+        self.stepline2_H_l = rospy.get_param("/stepline2_H_l", default=170)
+        self.stepline2_S_l = rospy.get_param("/stepline2_S_l", default=50)
+        self.stepline2_V_l = rospy.get_param("/stepline2_V_l", default=131)
+
+        self.stepline2_H_u = rospy.get_param("/stepline2_H_u", default=180)
+        self.stepline2_S_u = rospy.get_param("/stepline2_S_u", default=170)
+        self.stepline2_V_u = rospy.get_param("/stepline2_V_u", default=222)
 
 
-            ## PARAMS   
-
-            self.order = rospy.get_param("/order", default=[0,1,2])
-
-            self.CELLS_PER_METER = rospy.get_param("/occup_cellspermeter", default=50)
-            self.IS_FREE = rospy.get_param("/occup_isfree", default=0)
-            self.IS_OCCUPIED = rospy.get_param("/occup_osoccupied", default=100)
-
-            self.road_maxwidth = rospy.get_param("/road_maxwidth", default=240)
-            self.road_lane_offset = rospy.get_param("/road_lane_offset", default=0.3)
-
-            self.inside_tunnel_thresh = rospy.get_param("/lidar_inside_tunnel_threshold", default=0.55)
-
-            self.rrt_step = rospy.get_param("/rrt_step", default=6)
-            self.rrt_radius = rospy.get_param("/rrt_radius", default=60)
-            self.rrt_maxiters = rospy.get_param("/rrt_maxiters", default=400)
-
-            self.same_bottle_threshold = rospy.get_param("/bottles_same_bottle_threshold", default=0.12)
-            self.bottles_area_threshold = rospy.get_param("/bottles_area_threshold", default=200)
-            self.bottles_target_distance = rospy.get_param("/bottles_target_distance", default=0.46)
-            self.bottles_tolerance = rospy.get_param("/bottles_tolerance", default=0.06)
-
-            print("PARAM ", self.bottles_target_distance)
-
-            self.ang_vel_clip = rospy.get_param("/ang_vel_clip", default=10.0)
-
-            self.stepline_delay = rospy.get_param("/step_last_detection_threshold", default=6.0)
-            self.stepline_upper_area = rospy.get_param("/step_upper_area_threshold", default=2400)
-            self.stepline_lower_area = rospy.get_param("/step_lower_area_threshold", default=3200)
-
-            self.max_speed = rospy.get_param("/max_speed", default=0.22)
 
 
-            ## ROAD
+        #Blue Color Gains
+        self.blue_H_l = rospy.get_param("/blue_H_l", default=77)
+        self.blue_S_l = rospy.get_param("/blue_S_l", default=32)
+        self.blue_V_l = rospy.get_param("/blue_V_l", default=76)
 
-            # Yellow colour Gains
-            self.left_H_l = rospy.get_param("/left_H_l", default=77)
-            self.left_S_l = rospy.get_param("/left_S_l", default=32)
-            self.left_V_l = rospy.get_param("/left_V_l", default=76)
+        self.blue_H_u = rospy.get_param("/blue_H_u", default=102)
+        self.blue_S_u = rospy.get_param("/blue_S_u", default=180)
+        self.blue_V_u = rospy.get_param("/blue_V_u", default=132)
 
-            self.left_H_u = rospy.get_param("/left_H_u", default=102)
-            self.left_S_u = rospy.get_param("/left_S_u", default=180)
-            self.left_V_u = rospy.get_param("/left_V_u", default=132)
+        # Yellow Color Gains
+        self.yellow_H_l = rospy.get_param("/yellow_H_l", default=100)
+        self.yellow_S_l = rospy.get_param("/yellow_S_l", default=74)
+        self.yellow_V_l = rospy.get_param("/yellow_V_l", default=123)
 
-            # White colour Gains
-            self.right_H_l = rospy.get_param("/right_H_l", default=100)
-            self.right_S_l = rospy.get_param("/right_S_l", default=74)
-            self.right_V_l = rospy.get_param("/right_V_l", default=123)
+        self.yellow_H_u = rospy.get_param("/yellow_H_u", default=120)
+        self.yellow_S_u = rospy.get_param("/yellow_S_u", default=255)
+        self.yellow_V_u = rospy.get_param("/yellow_V_u", default=255)
 
-            self.right_H_u = rospy.get_param("/right_H_u", default=120)
-            self.right_S_u = rospy.get_param("/right_S_u", default=255)
-            self.right_V_u = rospy.get_param("/right_V_u", default=255)
+        # Green Color Gains
+        self.green_H_l = rospy.get_param("/green_H_l", default=100)
+        self.green_S_l = rospy.get_param("/green_S_l", default=74)
+        self.green_V_l = rospy.get_param("/green_V_l", default=123)
 
-            # Red colour Gains (Assuming two ranges for red)
-            self.stepline1_H_l = rospy.get_param("/stepline1_H_l", default=0)
-            self.stepline1_S_l = rospy.get_param("/stepline1_S_l", default=0)
-            self.stepline1_V_l = rospy.get_param("/stepline1_V_l", default=0)
-
-            self.stepline1_H_u = rospy.get_param("/stepline1_H_u", default=10)
-            self.stepline1_S_u = rospy.get_param("/stepline1_S_u", default=255)
-            self.stepline1_V_u = rospy.get_param("/stepline1_V_u", default=255)
-
-            self.stepline2_H_l = rospy.get_param("/stepline2_H_l", default=170)
-            self.stepline2_S_l = rospy.get_param("/stepline2_S_l", default=50)
-            self.stepline2_V_l = rospy.get_param("/stepline2_V_l", default=131)
-
-            self.stepline2_H_u = rospy.get_param("/stepline2_H_u", default=180)
-            self.stepline2_S_u = rospy.get_param("/stepline2_S_u", default=170)
-            self.stepline2_V_u = rospy.get_param("/stepline2_V_u", default=222)
-
-
-            ## BOTTLES
-
-            #Blue colour Gains
-            self.blue_H_l = rospy.get_param("/blue_H_l", default=77)
-            self.blue_S_l = rospy.get_param("/blue_S_l", default=32)
-            self.blue_V_l = rospy.get_param("/blue_V_l", default=76)
-
-            self.blue_H_u = rospy.get_param("/blue_H_u", default=102)
-            self.blue_S_u = rospy.get_param("/blue_S_u", default=180)
-            self.blue_V_u = rospy.get_param("/blue_V_u", default=132)
-
-            # Yellow colour Gains
-            self.yellow_H_l = rospy.get_param("/yellow_H_l", default=100)
-            self.yellow_S_l = rospy.get_param("/yellow_S_l", default=74)
-            self.yellow_V_l = rospy.get_param("/yellow_V_l", default=123)
-
-            self.yellow_H_u = rospy.get_param("/yellow_H_u", default=120)
-            self.yellow_S_u = rospy.get_param("/yellow_S_u", default=255)
-            self.yellow_V_u = rospy.get_param("/yellow_V_u", default=255)
-
-            # Green colour Gains
-            self.green_H_l = rospy.get_param("/green_H_l", default=100)
-            self.green_S_l = rospy.get_param("/green_S_l", default=74)
-            self.green_V_l = rospy.get_param("/green_V_l", default=123)
-
-            self.green_H_u = rospy.get_param("/green_H_u", default=120)
-            self.green_S_u = rospy.get_param("/green_S_u", default=255)
-            self.green_V_u = rospy.get_param("/green_V_u", default=255)
-
-
-        except rospy.ROSException as e:
-            rospy.logerr("Failed to get parameters: {}".format(e))
-
+        self.green_H_u = rospy.get_param("/green_H_u", default=120)
+        self.green_S_u = rospy.get_param("/green_S_u", default=255)
+        self.green_V_u = rospy.get_param("/green_V_u", default=255)
 
 
     def callback_image(self, msg):
@@ -949,11 +891,13 @@ class TurtleController:
         if self.laser_scan is None:
                 rospy.logwarn("No LiDAR data received!")
                 return
-        if self.step <=2 and self.sim:
+        if self.step == 2:
             self.second_process(self.cv_image_rect)
 
 
     def obstacle_detection(self):
+
+        self.cmd_speed = 0.20
 
         if self.occupancy_grid is None:
             return False
@@ -961,11 +905,7 @@ class TurtleController:
         
         MARGIN = (4, 5)[self.sim]
         current_pos = (self.occupancy_grid.shape[0]//2 - 1, 0)
-
-        if self.sim:
-            goal_pos = (self.occupancy_grid.shape[0]//2 - 1, 12)
-        else:
-            goal_pos = (self.occupancy_grid.shape[0]//2 - 1, 8)
+        goal_pos = (self.occupancy_grid.shape[0]//2 - 1, 12)
 
         print(current_pos)
         
@@ -993,9 +933,10 @@ class TurtleController:
     
         rows, cols = self.image.shape[:2]
         
-        speed = self.max_speed
-        if self.step == 4:
-            speed = 0.1
+        speed = 0.2
+
+        # if self.step == 2 and self.sim:
+        #     speed = 0.2
 
         print("left, right", self.left_lane, self.right_lane)
 
@@ -1006,7 +947,6 @@ class TurtleController:
 
         print("left, right", self.left_lane, self.right_lane)
 
-        
 
         if np.isnan(self.left_lane[1]):
             if np.isnan(self.right_lane[1]):
@@ -1031,15 +971,13 @@ class TurtleController:
 
         print("width ", self.right_lane[1] - self.left_lane[1], "\n")
 
-        max_width = self.road_maxwidth
-        offset = self.road_lane_offset
+        max_width = (550, 240)[self.sim]
+        offset = (0.45, 0.3)[self.sim]
 
-        if (self.right_lane[1] - self.left_lane[1]) > max_width and self.step < 4:
+        if (self.right_lane[1] - self.left_lane[1]) > max_width:
             print("Road split detected, following white line.")
             # print("left lane, cols", self.left_lane[1], cols*offset)
             center_of_road = self.left_lane[1] + (cols * offset)
-        elif (self.right_lane[1] - self.left_lane[1]) > max_width:
-            center_of_road = self.right_lane[1] - (cols * offset)
 
 
         self.error = center_of_road - self.image.shape[1]//2
@@ -1083,11 +1021,11 @@ class TurtleController:
             lower_yellow = np.array([self.left_H_l,self.left_S_l,self.left_V_l])
             upper_yellow = np.array([self.left_H_u,self.left_S_u,self.left_V_u])
 
-            # Define HSV thresholds for red colour
+            # Define HSV thresholds for red color
             lower_right = np.array([self.right_H_l, self.right_S_l, self.right_V_l])
             upper_right = np.array([self.right_H_u, self.right_S_u, self.right_V_u])
 
-            # Create masks for yellow and white colours
+            # Create masks for yellow and white colors
             mask_left = cv.inRange(hsv, lower_yellow, upper_yellow)
             mask_right = cv.inRange(hsv, lower_right, upper_right)
 
@@ -1181,8 +1119,11 @@ class TurtleController:
         lane_indices = np.concatenate(lane_indices)
         lanex = x[lane_indices]
         laney = y[lane_indices]
+
+        print(lane, len(lane_indices))
         
         if len(lane_indices) < 3000:
+            print("NOT ENOUGH POINTSSS", len(lane_indices))
             return None, None
 
 
@@ -1235,7 +1176,7 @@ class TurtleController:
     def findPoints(self, img_shape, left_fit=None, right_fit=None):
         ploty = np.linspace(0, img_shape[0]-1, img_shape[0])
 
-        LANE_WIDTH_PIXELS = 610
+        LANE_WIDTH_PIXELS = (350, 600)[self.step == 2]
         
         if left_fit is not None and right_fit is None:
             right_fit = self.estimate_missing_lane(left_fit, 'left', LANE_WIDTH_PIXELS)
@@ -1267,25 +1208,10 @@ class TurtleController:
 
     def radiusOfCurvature(self,img, left_fit, right_fit):
         y_eval = img.shape[0]//2
-        try:
-            left_radius = -1 * ((1 + (2*left_fit[0]*y_eval + left_fit[1])**2)**1.5) / (2*left_fit[0])
-        except:
-            left_radius = None
-        try:
-            right_radius = -1 * ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / (2*right_fit[0])
-        except:
-            right_radius = None
-        if left_radius is None:
-            if right_radius is None:
-                avg_radius = None
-            else:
-                avg_radius = right_radius
-        else:
-            if left_radius is None:
-                avg_radius = left_radius
-            else:
-                avg_radius = (left_radius+right_radius)/2
-        return avg_radius
+        left_radius = -1 * ((1 + (2*left_fit[0]*y_eval + left_fit[1])**2)**1.5) / (2*left_fit[0])
+        right_radius = -1 * ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / (2*right_fit[0])
+        avg_radius = (left_radius+right_radius)/2
+        return round(left_radius,2), round(right_radius,2), round(avg_radius,2)
 
 
     def combine_vision_and_lidar(self, roadmap):
@@ -1295,6 +1221,7 @@ class TurtleController:
 
 
     def second_process(self, image):
+    
         height, width, _ = image.shape
 
         # polygon = [(int(width*0.05), int(height)), (int(width*0.3), int(height*0.7)), (int(width*0.7), int(height*0.7)), (int(0.95*width), int(height))]
@@ -1331,13 +1258,7 @@ class TurtleController:
             print("no fit")
             return
         
-        if left_fit is None:
-            center_fit = right_fit
-        elif right_fit is None:
-            center_fit = left_fit
-        else:
-            center_fit = (left_fit + right_fit) * 0.5
-
+        print("PTS RIGHT ", right_fit)
 
         pts_left, pts_right = self.findPoints(warped_img_shape, left_fit, right_fit)
 
@@ -1347,25 +1268,14 @@ class TurtleController:
         unwarped_fill_curves = self.unwarp(fill_curves, source_points, destination_points, (width, height))
         window1 = cv.addWeighted(image, 1, unwarped_fill_curves, 1, 0)
 
-
-        # self.avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
-
-        # print("RADIUS", self.avg_radius)
-
-
-
         road = self.warp(window1, source_points, destination_points, warped_img_size)
 
 
-        # image_message = self.bridge.cv2_to_imgmsg(road, "passthrough")
-        # self.image_pub.publish(image_message)
+        image_message = self.bridge.cv2_to_imgmsg(fill_curves, "passthrough")
+        self.image_pub.publish(image_message)
 
-        road_mask1 = cv.inRange(road, np.array([240,240,240]), np.array([255,255,255]))
-        road_mask2 = cv.inRange(road, np.array([0,240,240]), np.array([30,255,255]))
-        road_mask3 = cv.inRange(road, np.array([240,0,240]), np.array([255,30,255]))
 
-        road_mask = road_mask1 + road_mask2 + road_mask3
-
+        road_mask = cv.inRange(road, np.array([250,0,250]), np.array([255,20,255]))
         road = cv.bitwise_and(road, road, mask=road_mask)
 
         road = cv.GaussianBlur(road,(11,11),0)
@@ -1380,6 +1290,19 @@ class TurtleController:
         road = cv.cvtColor(road, cv.COLOR_BGR2GRAY)
         _,road = cv.threshold(road,40,255,cv.THRESH_BINARY)
 
+        # # self.publish_occupancy_grid()
+
+        # self.old_radius = self.avg_radius
+        # left_radius, right_radius, self.avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
+
+        # avg_radius = self.avg_radius
+
+        # if abs(self.old_radius - avg_radius) > 5000 and abs(avg_radius)<5000:
+        #     rospy.logwarn(f"REJECTED {(self.old_radius - avg_radius)/avg_radius}")
+        #     self.avg_radius = self.old_radius
+        # else:
+        #     self.road = road
+
             
         kernel = np.ones(shape=[2, 2])
         self.occupancy_grid2 = signal.convolve2d(
@@ -1387,10 +1310,37 @@ class TurtleController:
         )
         self.occupancy_grid2 = np.clip(self.occupancy_grid2, 0, 50)
 
-        self.merge_occup_grids()     
+        self.merge_occup_grids()
+
+
+        # print("AVG RADIUS: ", avg_radius)
+        
+
+        
 
 
 
+        # if abs(left_radius)>5000 and abs(right_radius)>5000:
+        #     print("road is straight")
+        #     pass
+        #     # self.error = 0
+        # elif abs(avg_radius)<5000:
+        #     if avg_radius < 0:
+        #         pass
+        #         print("Road is turning right ", avg_radius)
+        #     else:
+        #         pass
+        #         print("Road is turning left ", avg_radius)
+            # self.error = (5000. - avg_radius)/5000.
+
+        # self.cmd_speed =  0.22 #0.22
+        # self.ang_vel = (self.crosstrack_error[0] * -0.01) + self.heading_error[0] * -0.01
+
+        # print(self.ang_vel)
+        # print("Heading error ", self.heading_error[0])
+        # print("Crosstrack error ", self.crosstrack_error[0])
+
+        
         
         pass
 
@@ -1402,45 +1352,33 @@ class TurtleController:
 
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
 
-        lidar_occup = signal.medfilt2d(lidar_occup, 3)
 
+        if self.sim and self.step == 2:
 
-        if self.sim:
-            if self.step <= 2:
-                lidar_occup = lidar_occup[72:, 55:-55]
-                # Create a structuring element (disk) corresponding to half the robot's width
-                selem = disk(4)  # 'radius' should be set to half the robot's width in pixels
+            lidar_occup = lidar_occup[72:, 55:-55]
+            # Create a structuring element (disk) corresponding to half the robot's width
+            selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
 
-                # Dilate the obstacle map
-                inflated_obstacles = dilation(lidar_occup, selem)
+            # Dilate the obstacle map
+            inflated_obstacles = dilation(lidar_occup, selem)
+            lidar_occup = np.where(inflated_obstacles, 100, 0)
 
-                selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
-                inflated_road = dilation(self.occupancy_grid2, selem)
-                
-                lidar_occup = np.where(inflated_obstacles, 100, 0)
+            self.occupancy_grid2 = np.where(self.occupancy_grid2 >0 ,0, 100)
 
-                occu = np.where(inflated_road >0 ,0, 100)
+            self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
 
-                occu = np.bitwise_or(lidar_occup, occu)
+            self.occupancy_grid2 = np.where(self.occupancy_grid2 >0 ,0, 100)
+            
+            print(self.occupancy_grid2.shape)
 
-                self.occupancy_grid2 = np.where(occu >0 ,0, 100)
-            else:
-                self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
-            # self.occupancy_grid2 = lidar_occup
-            # self.occupancy_grid2 = np.where(self.occupancy_grid2 >0 ,0, 100)
-
-            # padding_width = 1
-            # self.occupancy_grid2 = np.pad(occu, ((padding_width, 0), (padding_width, padding_width)), mode='constant', constant_values=100)
-
-        
         else:
             self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
 
             
 
+       
 
-
-        # # self.publish_occupancy_grid()
+        # self.publish_occupancy_grid()
 
 
     def publish_occupancy_grid(self):
@@ -1487,7 +1425,7 @@ class TurtleController:
         self.image = np.copy(image)
 
         if self.step <= 4:
-            # Convert image to HSV colour space
+            # Convert image to HSV color space
             hsv = cv.cvtColor(image, cv.COLOR_BGR2HSV)
 
             rectangle = np.copy(hsv)
@@ -1495,10 +1433,10 @@ class TurtleController:
 
             if self.sim:
                 rectangle[:150, :, :] = 0
-                rectangle[220:, :, :] = 0
+                # rectangle[220:, :, :] = 0
             else:
                 pass
-                # rectangle[:250, :, :] = 0
+                # rectangle[]
                 # rectangle[:, :40, :] = 0 
                 # rectangle[:, 280:, :] = 0
 
@@ -1519,15 +1457,8 @@ class TurtleController:
             upper_stepline2 = np.array([self.stepline2_H_u, self.stepline2_S_u, self.stepline2_V_u])
 
 
-
-
-            # Create masks for left, right and stepline colours
+            # Create masks for left, right and stepline colors
             mask_left = cv.inRange(rectangle, lower_left, upper_left)
-
-            if not self.sim:
-                rectangle[:350, : : ] = 0
-        
-
             mask_right = cv.inRange(rectangle, lower_right, upper_right)
 
 
@@ -1536,12 +1467,11 @@ class TurtleController:
             mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel)
             mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel)
 
-            rectangle = np.copy(hsv)
             if not self.sim:
                 pass
-                # rectangle[:150, : : ] = 0
+                # rectangle[:350, : : ] = 0
             else:
-                rectangle[:200, :, :] = 0
+                pass
                 # rectangle[:, :60, :] = 0
                 # rectangle[:, 280:, :] = 0
 
@@ -1553,7 +1483,7 @@ class TurtleController:
 
 
 
-            # In the real world, the right lane is red, so we use the red colour (with the two ranges). 
+            # In the real world, the right lane is red, so we use the red color (with the two ranges). 
             # It's easier to just switch stepline and right than to change everything. 
 
             if self.sim:
@@ -1594,24 +1524,17 @@ class TurtleController:
             stepline_area = area
 
 
-            print("AREA STEPLINE  ", stepline_area)
+            # print("AREA STEPLINE  ", stepline_area)
 
-            # lower = (15000,2400)[self.sim]
-            lower = self.stepline_lower_area
-            # upper = (30000,3200)[self.sim] 
-            upper = self.stepline_upper_area
+            lower = (15000,2400)[self.sim]
+            upper = (30000,3200)[self.sim] 
 
-            # print("range", lower, upper)
-
-            # last_detection_threshold = (6,14)[self.sim and self.step == 2]
-            last_detection_threshold = self.stepline_delay
-            if self.step == 2 and self.sim:
-                last_detection_threshold = 14
+            last_detection_threshold = (6,14)[self.sim and self.step == 2]
 
 
             if (stepline_area > lower and stepline_area < upper):
                 if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < last_detection_threshold):
-                    print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
+                    # print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
                     pass
                 else:
                     self.detect_stepline = True
@@ -1663,53 +1586,35 @@ class TurtleController:
             center_right = tuple([self.right_lane[1], self.right_lane[0]])
 
             radius = 10 
-            colour = (0, 255, 0)  # Green 
-            colour2 = (255, 255, 0) # Cyan
+            color = (0, 255, 0)  # Green 
+            color2 = (255, 255, 0) # Cyan
             thickness = 2 
 
             # Draw the circle on the self.image
             if not np.isnan(center_left[0]):
-                cv.circle(self.image, center_left, radius, colour, thickness)
+                cv.circle(self.image, center_left, radius, color, thickness)
             if not np.isnan(center_right[0]):
-                cv.circle(self.image, center_right, radius, colour2, thickness)
-            # cv.circle(self.image, center_road, radius, colour2, 5)
+                cv.circle(self.image, center_right, radius, color2, thickness)
+            # cv.circle(self.image, center_road, radius, color2, 5)
 
-
-
-            image_message = self.bridge.cv2_to_imgmsg(mask_left, "passthrough")
-            self.image_pub.publish(image_message)
 
             
         else:
             pass
 
     def last_challenge(self):
-
         if self.occupancy_grid is None:
-            rospy.logwarn("No occup grid")
             return
         
 
         lidar_occup = np.copy(self.occupancy_grid.filled(0))
-
-        
-        kernel = np.ones((15,15), np.uint8)
-
-
-
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
 
-        lidar_occup = signal.medfilt2d(lidar_occup, 3)
-        print("max", np.max(lidar_occup))
-
-
-        
         self.occupancy_grid2 = np.zeros((lidar_occup.shape[0], lidar_occup.shape[1], 3), dtype=np.uint8)
 
         self.occupancy_grid2 = cv.cvtColor(self.occupancy_grid2, cv.COLOR_BGR2GRAY)
-        
-        self.pathplanner.set_image(self.occupancy_grid2)
 
+        self.pathplanner.set_image(self.occupancy_grid2)
 
 
         OccuGrid2 = (np.argwhere(lidar_occup == 100))
@@ -1720,16 +1625,16 @@ class TurtleController:
             clustering = DBSCAN(eps=3, min_samples=10).fit(OccuGrid2)
             
             labels = clustering.labels_
-            n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+            # n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
 
-            print("clusters ", n_clusters_)
+            # print("clusters ", n_clusters_)
 
             unique_labels = set(labels)
             core_samples_mask = np.zeros_like(labels, dtype=bool)
             core_samples_mask[clustering.core_sample_indices_] = True
 
-            colours = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
-            for k, col in zip(unique_labels, colours):
+            colors = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
+            for k, col in zip(unique_labels, colors):
                 # if k == -1:
                 #     # Black used for noise.
                 #     col = [0, 0, 0, 1]
@@ -1737,15 +1642,16 @@ class TurtleController:
                 class_member_mask = labels == k
 
                 xy = OccuGrid2[class_member_mask & core_samples_mask]
-                print("LEN XY", len(xy))
-                if len(xy)>0 and len(xy)<30:
+                if len(xy)>0:
                     x = round(np.mean(xy[:,0]))
-                    y = round(np.mean(xy[:,1]))    
+                    y = round(np.mean(xy[:,1]))
 
+                    print("LEN XY ", len(xy))
 
                     x, y = self.turtle_to_odom((x,y))
 
                     matched = False
+
 
                     for i in self.bottles:
                         x2, y2 = i.get_position()
@@ -1761,7 +1667,7 @@ class TurtleController:
                             continue
                     if not matched and not self.confirmed:
                         print("new bottle discovered!", (x,y),)
-                        self.bottles.append(Bottle(len(self.bottles), (x,y)))
+                        self.bottles.append(Bottle(len(self.bottles), (x,y), shape=self.occupancy_grid.shape))
                     # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
 
 
@@ -1772,8 +1678,8 @@ class TurtleController:
 
         
 
-        target_distance = self.bottles_target_distance
-        tolerance = self.bottles_tolerance
+        target_distance = (19.0, 0.46)[self.sim]
+        tolerance = (2.5, 0.06)[self.sim]
 
         if not self.confirmed:
             for i in range(len(self.bottles)):
@@ -1784,10 +1690,10 @@ class TurtleController:
                         x1, y1 = self.bottles[i].get_position()
                         x2, y2 = self.bottles[j].get_position()
                         distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                        print("DISTANCE BETWEEN BOTTLES ", distance)
+                        # print("DISTANCE BETWEEN BOTTLES ", distance)
                         if abs(distance - target_distance) < tolerance:
-                            print("DISTANCE ", distance, distance - target_distance)
                             potential_neighbors[i].append(j)
+                            # print(distance)
                             # print(i,j)
                             
             # print("potential", potential_neighbors)
@@ -1834,6 +1740,7 @@ class TurtleController:
 
                 self.gates.append(Gate(center_position=(cX,cY), bottle_index1=self.bottles[i[0]].get_index(), bottle_index2=self.bottles[i[1]].get_index()))
                 # cv.circle(self.occupancy_grid2, [cX,cY], 2, (0,255,0), 3)
+
         nb = {}
 
         for g in range(0,len(self.gates)):
@@ -1846,21 +1753,16 @@ class TurtleController:
                 try:    
                     nb[i.get_gate()] += 1
 
-                    if self.gates[i.get_gate()].get_colour() == self.order[self.current_index] and self.found_colours:
+                    if self.gates[i.get_gate()].get_color() == self.order[self.current_index] and self.found_colors:
                         pass
                         # print("Opened target gate")
                     else:
                         # self.occupancy_grid2[self.gates[i.get_gate()].get_center_pos()[0], self.gates[i.get_gate()].get_center_pos()[1]] = 127
                         b1,b2 = self.gates[i.get_gate()].get_bottles_indices()
-                        cells = list(self.traverse_grid(self.odom_to_grid(self.bottles[b1].get_position()), self.odom_to_grid(self.bottles[b2].get_position())))
-                        # print(b1, b2)
-                        # print(self.odom_to_grid(self.bottles[b1].get_position()))
-                        # print(self.odom_to_grid(self.bottles[b2].get_position()))
+                        cells = self.traverse_grid(self.odom_to_grid(self.bottles[b1].get_position()), self.odom_to_grid(self.bottles[b2].get_position()))
+                        # print("CELLS ", cells)
                         for c in cells:
-                            try:
-                                self.occupancy_grid2[c[0],c[1]] = 127
-                            except:
-                                continue
+                            self.occupancy_grid2[c[0],c[1]] = 127
                 except:
                     pass
             try:
@@ -1902,7 +1804,6 @@ class TurtleController:
         try:
             hsv = cv.cvtColor(self.cv_image_rect, cv.COLOR_BGR2HSV)
         except:
-            print("ERROR WITH THE HSV?")
             return
 
         # Blue lane
@@ -1926,8 +1827,7 @@ class TurtleController:
         contours_yellow, _ = cv.findContours(mask_yellow, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
 
 
-        # threshold = (6000, 200)[self.sim]
-        threshold = self.bottles_area_threshold
+        threshold = (6000, 200)[self.sim]
 
 
 
@@ -1937,7 +1837,7 @@ class TurtleController:
 
         for i in contours_blue:
             if cv.contourArea(i) > threshold:
-                print("contour blue area: ", cv.contourArea(i))
+                # print("contour blue area: ", cv.contourArea(i))
                 M = cv.moments(i)
                 if M["m00"] != 0:
                     y = int(M["m10"] / M["m00"])
@@ -1996,7 +1896,7 @@ class TurtleController:
         possible_pairing = {0: [], 1: [], 2: []}
 
         for i in self.active_gates:
-            if self.gates[i].get_colour() is None:
+            if self.gates[i].get_color() is None:
                 center = self.odom_to_grid(self.gates[i].get_center_pos())
                 local_center = (self.occupancy_grid.shape[1] - center[0], center[1] - 0.5*self.occupancy_grid.shape[0])
                 angle = math.atan2(local_center[1], local_center[0])
@@ -2010,13 +1910,13 @@ class TurtleController:
                             if abs(value[0] - angle*10) < 30:
                                 possible_pairing[key].append(i)
 
-        for colour, gate in possible_pairing.items():
+        for color, gate in possible_pairing.items():
             if len(gate) == 1:
-                rospy.logwarn(f"FOUND colour FOR GATE {gate}, colour IS {colour}")
-                self.gates[gate[0]].set_colour(colour, self.bottles)
+                rospy.logwarn(f"FOUND COLOR FOR GATE {gate}, COLOR IS {color}")
+                self.gates[gate[0]].set_colour(color, self.bottles)
 
-        for gate in self.active_gates:
-            print(gate, self.gates[gate].get_colour())
+        # for gate in self.active_gates:
+            # print(gate, self.gates[gate].get_color())
 
 
 
@@ -2026,8 +1926,8 @@ class TurtleController:
             unassigned_gates = []
 
             for i in self.active_gates:
-                if not self.gates[i].get_colour() is None:
-                    colours.remove(self.gates[i].get_colour())
+                if not self.gates[i].get_color() is None:
+                    colours.remove(self.gates[i].get_color())
                 else:
                     unassigned_gates.append(i)
 
@@ -2036,7 +1936,7 @@ class TurtleController:
 
 
             if len(colours) == 1 and len(unassigned_gates) == 1:
-                rospy.logwarn(f"FOUND REMAINING colour FOR GATE {unassigned_gates[0]}, colour IS {colours[0]}")
+                rospy.logwarn(f"FOUND REMAINING COLOR FOR GATE {unassigned_gates[0]}, COLOR IS {colours[0]}")
                 self.gates[unassigned_gates[0]].set_colour(colours[0], self.bottles)
             elif len(colours) == 1:
                 for i in self.bottles:
@@ -2051,7 +1951,7 @@ class TurtleController:
             if len(colours) > 0:
                 # print("Not found the one we want yet. We'll explore a bit.")
                 for i in self.active_gates:
-                    if self.gates[i].get_colour() is None:
+                    if self.gates[i].get_color() is None:
                         if not self.gates[i].get_offset_points()[0] is None:
                             point, dist = self.closest_point(self.gates[i].get_offset_points())
                             points.append(point)
@@ -2060,9 +1960,9 @@ class TurtleController:
                             
             else:
                 for i in self.active_gates:
-                    if self.gates[i].get_colour() == self.order[self.current_index]:
+                    if self.gates[i].get_color() == self.order[self.current_index]:
                         # print("GOING TO THE CORRECT ONE!")
-                        self.found_colours = True
+                        self.found_colors = True
                         self.state = 1
                         goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
                         self.target_gate = i
@@ -2075,9 +1975,9 @@ class TurtleController:
 
         elif self.state == 1:
             for i in self.active_gates:
-                    if self.gates[i].get_colour() == self.order[self.current_index]:
+                    if self.gates[i].get_color() == self.order[self.current_index]:
                         # print("GOING TO THE CORRECT ONE!")
-                        self.found_colours = True
+                        self.found_colors = True
                         self.state = 1
                         goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
                         self.target_gate = i
@@ -2090,13 +1990,13 @@ class TurtleController:
         #     #Get opposite point
         #     goal_point = self.closest_point(self.gates[i].get_offset_points(), closest=False)[0]
 
-        image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
-        self.image_pub.publish(image_message)
+        
 
         if not goal_point is None:
             self.path_planning(goal_point)
 
-        
+        image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
+        self.image_pub.publish(image_message)
 
 
     def closest_point(self, points, closest=True):
@@ -2130,9 +2030,9 @@ class TurtleController:
 
         goal = np.array(goal, dtype=np.int16)
 
-        print("state ", self.state)
+        print("GOAL ", goal)
 
-        self.cmd_speed = self.max_speed
+        self.cmd_speed = 0.15
 
         if goal[1] >= self.occupancy_grid.shape[0]:
             goal[1] = self.occupancy_grid.shape[0]-1
@@ -2141,14 +2041,8 @@ class TurtleController:
 
         # print("GOAL", goal, self.occupancy_grid.shape, self.occupancy_grid2.shape)
 
-        lidar_occup = np.copy(self.occupancy_grid2)
 
-        # lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
-
-        # lidar_occup = signal.medfilt2d(lidar_occup, 3)
-
-        occu_grid_cp = (lidar_occup > 95)
-
+        occu_grid_cp = (self.occupancy_grid2 > 95)
 
         # Create a structuring element (disk) corresponding to half the robot's width
         selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
@@ -2157,10 +2051,9 @@ class TurtleController:
         inflated_obstacles = dilation(occu_grid_cp, selem)
         inflated_obstacles = np.where(inflated_obstacles, 0, 100)
 
-
         self.pathplanner.set_image(inflated_obstacles)
 
-        # self.occupancy_grid2 = inflated_obstacles
+        self.occupancy_grid2 = inflated_obstacles
 
         self.publish_occupancy_grid()
 
@@ -2172,7 +2065,6 @@ class TurtleController:
         waypoint = goals[1]
 
         if waypoint is None:
-            # self.cmd_speed = 0
             local_waypoint = np.array((10, 0))
         else:
             local_waypoint = np.array((self.occupancy_grid2.shape[0] - waypoint[0], waypoint[1] - 0.5 * self.occupancy_grid2.shape[1]))
@@ -2186,22 +2078,22 @@ class TurtleController:
                 self.state = 1
                 self.current_index += 1
 
-        if distance < 5.0 and not self.found_colours:  
+        if distance < 5.0 and not self.found_colors:  
 
             target_point, _ = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)
             # print("Target point: ", target_point)
             heading = math.atan2(target_point[1], target_point[0])
             Kp = (1.5, -1.5)[self.sim]
-            self.ang_vel = np.sign(heading) * 0.75
+            self.ang_vel = heading * Kp
             self.cmd_speed = 0
 
 
 
 
-        elif distance < 5.0 and self.found_colours and not self.state==2:
+        elif distance < 5.0 and self.found_colors and not self.state==2:
             # print("Transitting.")
             self.state = 2
-        # elif distance < 5.0 and self.found_colours and self.state == 2:
+        # elif distance < 5.0 and self.found_colors and self.state == 2:
         #     rospy.logwarn("Transitted.")
         #     self.current_index += 1
         #     self.state = 1

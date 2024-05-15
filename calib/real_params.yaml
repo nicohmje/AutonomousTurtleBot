@@ -1,0 +1,27 @@
+order: [0,2,1]
+
+road_maxwidth: 550
+road_lane_offset: 0.45
+
+step_last_detection_threshold: 6
+step_lower_area_threshold: 15000
+step_upper_area_threshold: 30000
+
+lidar_inside_tunnel_threshold: 0.3
+
+occup_isfree: 0
+occup_isoccupied: 100
+occup_cellspermeter: 50
+
+rrt_step: 8
+rrt_radius: 60
+rrt_maxiters: 100
+
+bottles_same_bottle_threshold: 0.12
+bottles_area_threshold: 3000
+bottles_target_distance: 0.46
+bottles_tolerance: 0.06
+
+ang_vel_clip: 1.6
+max_speed: 0.22
+
