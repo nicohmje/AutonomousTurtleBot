@@ -193,7 +193,13 @@ class TurtleController:
         if self.step == 5:
             if self.transited_gates == 3:
                 rospy.signal_shutdown("Finished all challenges.")
-            self.last_challenge()
+
+            elif self.buffer < 7:
+                self.cmd_speed = 0.2
+                self.ang_vel = 0.0
+                self.buffer += 1
+            else:
+                self.last_challenge()
 
 
     def make_cmd(self):
@@ -281,7 +287,7 @@ class TurtleController:
             Step 3 in the challenge (the corridor)
         """
         
-        Kp = (5.0, 6.0)[self.sim]
+        Kp = (5.0, 3.0)[self.sim]
 
         left_ranges = np.array(self.laser_scan.ranges[135:155])
         right_ranges = np.array(self.laser_scan.ranges[30:40])
@@ -316,7 +322,7 @@ class TurtleController:
 
             self.ang_vel = dir
         else:
-            self.ang_vel = 0.8
+            self.ang_vel = 1.0
 
         self.cmd_speed = 0.15
 
@@ -985,7 +991,7 @@ class TurtleController:
         """
         Publish populated occupancy grid to ros topic
         """
-        if self.occupancy_grid_pub.get_num_connections():
+        if not self.occupancy_grid_pub.get_num_connections():
             return
         oc = OccupancyGrid()
         oc.header.frame_id = "base_footprint"
@@ -1117,7 +1123,8 @@ class TurtleController:
             last_detection_threshold = self.stepline_delay
             if self.step == 2 and self.sim:
                 last_detection_threshold = 13.3 #because the obstacles are red in sim, we need to artifically limit the min time between detections.
-             
+            elif self.step == 3 and self.sim:
+                last_detection_threshold = 10
 
             if (stepline_area > lower and stepline_area < upper):
                 if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < last_detection_threshold):
@@ -1767,105 +1774,117 @@ class TurtleController:
         goal = np.array(goal, dtype=np.int16)
 
 
-        self.cmd_speed = self.max_speed - 0.1 #Don't go too fast
-
+        self.cmd_speed = self.max_speed #Don't go too fast
 
         # Often, the goal is outside the occupancy grid.
-        if goal[1] >= self.occupancy_grid.shape[0]:
-            goal[1] = self.occupancy_grid.shape[0]-1
-        if goal[0] >= self.occupancy_grid.shape[1]:
-                goal[0] = self.occupancy_grid.shape[1]-1
 
-        
-        """
-            To navigate around obstacles, we make an occupancy grid which includes the obstacles, bottles and gates.
+        if goal[1] >= self.occupancy_grid.shape[0] or goal[0] >= self.occupancy_grid.shape[1]:
 
-            The gates we don't want to go through are closed off. We inflate the occupancy grid because the path planning considers the robot to have a width of 0.
-            Inflating the obstacles by at least half of the robot's radius means we shouldn't hit them.
-        """
-
-        lidar_occup = np.copy(self.occupancy_grid2)
-        occu_grid_cp = (lidar_occup > 95)
-
-        selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
-
-        # Dilate the obstacle map
-        inflated_obstacles = dilation(occu_grid_cp, selem)
-        inflated_obstacles = np.where(inflated_obstacles, 0, 100)
-
-
-        #We set the RRT* to that.
-        self.pathplanner.set_occugrid(inflated_obstacles)
-
-
-        #This can be uncommented to visualize the inflated obstacles. 
-        #self.occupancy_grid2 = inflated_obstacles
-
-        self.publish_occupancy_grid() #only for visualization.
-
-        
-        # RUN RRT*
-        goals = self.pathplanner.plan(goal)
-
-
-        waypoint = goals[1]
-
-        if waypoint is None:
-            #This happens when the gate gets closed while we're still inside it, and we thus need to move out of it.
-            local_waypoint = np.array((10, 0))
-        else:
-            local_waypoint = np.array((self.occupancy_grid2.shape[0] - waypoint[0], waypoint[1] - 0.5 * self.occupancy_grid2.shape[1]))
-
-        distance = np.linalg.norm(local_waypoint)
-
-        # print(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
-
-        if self.state == 2 and not self.target_gate is None:
-            """
-                If we're transiting a gate, check our distance to the gate center to determine if we passed through.
-            """
-            if (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[0] - self.occupancy_grid.shape[1] ) < 6) and (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 6):
-                rospy.logwarn("TRANSITED")
-                self.transited_gates += 1
-                self.state = 1
-                self.current_index += 1
-
-        if distance < 5.0 and not self.found_colours:  
-            """
-                We need to observe this gate. So just spin in circles until you see it.
-            """
-            target_point, _ = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)
-            # print("Target point: ", target_point)
-            heading = math.atan2(target_point[1], target_point[0])
-            Kp = (0.75, -0.4)[self.sim]
-            self.ang_vel = np.sign(heading) * Kp
-            self.cmd_speed = 0
-
-
-
-
-        elif distance < 5.0 and self.found_colours and not self.state==2:
-            """
-                We traveled to the gate's first offset point and now want to cross that gate.
-            """
-            self.state = 2
-
-        elif not distance < 5.0:
-
-            """
-                We are going to the next gate.
-            """
+            local_waypoint = np.array((self.occupancy_grid2.shape[0] - goal[0], goal[1] - 0.5 * self.occupancy_grid2.shape[1]))
             heading = math.atan2(local_waypoint[1], local_waypoint[0])
+            Kp = (0.75, -0.7)[self.sim]
+            self.ang_vel = np.sign(heading) * Kp
+            self.cmd_speed = 0.0
 
 
-            for i in goals[1:]:
-                pass
-                # self.occupancy_grid2[int(i[0]),int(i[1])] = 0
+        else:
+                
+            #     goal[1] = self.occupancy_grid.shape[0]-1
+            # if goal[0] >= self.occupancy_grid.shape[1]:
+            #         goal[0] = self.occupancy_grid.shape[1]-1
             
-            Kp = (-1.5, -1.5)[self.sim]
-            if abs(heading) > (0.3,0.6)[self.sim]:
-                self.cmd_speed = 0.
-            self.ang_vel = heading * -1.5
+            """
+                To navigate around obstacles, we make an occupancy grid which includes the obstacles, bottles and gates.
+
+                The gates we don't want to go through are closed off. We inflate the occupancy grid because the path planning considers the robot to have a width of 0.
+                Inflating the obstacles by at least half of the robot's radius means we shouldn't hit them.
+            """
+
+            lidar_occup = np.copy(self.occupancy_grid2)
+            occu_grid_cp = (lidar_occup > 95)
+
+            selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
+
+            # Dilate the obstacle map
+            inflated_obstacles = dilation(occu_grid_cp, selem)
+            inflated_obstacles = np.where(inflated_obstacles, 0, 100)
+
+
+            #We set the RRT* to that.
+            self.pathplanner.set_occugrid(inflated_obstacles)
+
+
+            #This can be uncommented to visualize the inflated obstacles. 
+            #self.occupancy_grid2 = inflated_obstacles
+
+            self.publish_occupancy_grid() #only for visualization.
+
+            
+            # RUN RRT*
+            goals = self.pathplanner.plan(goal)
+
+
+            waypoint = goals[1]
+
+            if waypoint is None:
+                #This happens when the gate gets closed while we're still inside it, and we thus need to move out of it.
+                local_waypoint = np.array((10, 0))
+            else:
+                local_waypoint = np.array((self.occupancy_grid2.shape[0] - waypoint[0], waypoint[1] - 0.5 * self.occupancy_grid2.shape[1]))
+
+            distance = np.linalg.norm(local_waypoint)
+
+            # print(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
+
+            if self.state == 2 and not self.target_gate is None:
+                """
+                    If we're transiting a gate, check our distance to the gate center to determine if we passed through.
+                """
+                if (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[0] - self.occupancy_grid.shape[1] ) < 6) and (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 6):
+                    rospy.logwarn("TRANSITED")
+                    self.buffer = 0
+                    self.transited_gates += 1
+                    self.state = 1
+                    self.current_index += 1
+
+            if distance < 5.0 and not self.found_colours:  
+                """
+                    We need to observe this gate. So just spin in circles until you see it.
+                """
+                target_point, _ = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)
+                # print("Target point: ", target_point)
+                heading = math.atan2(target_point[1], target_point[0])
+                Kp = (0.75, -0.4)[self.sim]
+                self.ang_vel = np.sign(heading) * Kp
+                self.cmd_speed = 0
+
+
+
+
+            elif distance < 5.0 and self.found_colours and not self.state==2:
+                """
+                    We traveled to the gate's first offset point and now want to cross that gate.
+                """
+                self.state = 2
+
+            elif not distance < 5.0:
+
+                """
+                    We are going to the next gate.
+                """
+                heading = math.atan2(local_waypoint[1], local_waypoint[0])
+                
+                if distance<10.0:
+                    self.cmd_speed = 0.1
+
+                for i in goals[1:]:
+                    pass
+                    # self.occupancy_grid2[int(i[0]),int(i[1])] = 0
+                
+                Kp = (-1.5, -1.5)[self.sim]
+                if abs(heading) > (0.3,0.6)[self.sim]:
+                    self.cmd_speed = 0.
+                self.ang_vel = heading * Kp
         
         pass
 
