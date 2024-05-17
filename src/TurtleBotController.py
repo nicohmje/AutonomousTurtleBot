@@ -14,18 +14,14 @@ from projet.RRTStarPlanning import *
 from projet.LastChallengeClasses import *
 
 
-
 from cv_bridge import CvBridge
 
-
-from sensor_msgs.msg import Image
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool
 import matplotlib.pyplot as plt
-from std_msgs.msg import Int32
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
-3
+
 
 
 
@@ -34,81 +30,108 @@ class TurtleController:
 
     def __init__(self):
             
+
+            #This is called "masked frame" but it's mostly a placeholder for visualisation purposes.
             self.image_pub = rospy.Publisher("/masked_frame", Image, queue_size=1)
-            self.error_pub = rospy.Publisher("/error", Int32, queue_size=1)
+
             self.cmd_vel_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=1)
+
+            #This is called "_road" because previous attempts included a lane extracted from vision.
             self.occupancy_grid_pub = rospy.Publisher('occupancy_grid_road', OccupancyGrid, queue_size=4)
             
 
+            #When a GUI changes a param, this gets called.
             rospy.Subscriber("/param_change_alert", Bool, self.get_params)
 
-            self.laser_scan = None
-            self.cv_image = None
-            self.image = None
-            self.cv_image_rect = None
+
+
+            self.laser_scan = None #LiDAR data (processed)
+            self.cv_image = None #Raw image 
+            self.image = None #Processed image
+            self.cv_image_rect = None #Image that has had distortion corrected
+
+            #Turtlebot position and angle (2D plane)
             self.theta = None
             self.pos = None
 
 
-            self.detect_stepline = False
 
+            #Stepline detection
+            self.detecting_stepline = False
+            self.last_detection = None
+
+            #Current step (in the challenges). You can manually set it higher if you want to skip some challenges.
             self.step = 0
 
-            self.transited_gates = 0
 
+            #Obstacle detection
             self.lane = False #0 left, 1 right (for step 2)
             self.changing = True
             
 
-
+            #Commands given to the turtlebot.
             self.ang_vel = 0
             self.cmd_speed = 0
 
+
+
             self.error = 0
+
 
             self.avg_radius = 0
 
+
+            #The two occupancy grids. the first one is purely lidar.
             self.occupancy_grid = None
             self.occupancy_grid2 = None
 
+
+            #The lane estimations
             self.left_lane = [np.nan, np.nan]  
             self.right_lane = [np.nan, np.nan]
 
-
+            #When exiting the tunnel, we go forward for some ticks to really exit it
             self.buffer = 0
-
-            self.current_index = 0
-
             self.inside_tunnel = False
 
             
-            # self.order = [1,0,2] #0 blue, 1 green, 2 yellow
 
 
             self.bridge = CvBridge()
 
-            self.last_detection = None
             self.get_params()
 
+            
             self.pathplanner = RRTStarPlanning(stepSize=self.rrt_step, radius=self.rrt_radius, max_iters=self.rrt_maxiters, cpm=self.CELLS_PER_METER, is_occupied=self.IS_FREE) 
+            
+            
+            # Order list
+            # self.order = [1,0,2] #0 blue, 1 green, 2 yellow
 
+            #Current target colour (in the order vector)
+            self.current_index = 0
+
+            #List of all bottles and gates
             self.bottles = []
             self.gates = []
 
+            #Number of gates we've passed through
+            self.transited_gates = 0
+
+            #Dict mapping the colours to the gates.
             self.colour_to_gate = {0:None, 1:None, 2:None}
 
-            # self.same_bottle_threshold = (6,0.12)[self.sim]
+            #If we have found all the gates, we lock them in and don't go looking for new ones.
             self.confirmed = False
 
+            #Have we found all the colours for the gates?
             self.found_colours = False
 
             self.state = 0 #0 exploring, 1 transiting, 2 crossing 
             self.target_gate = None
 
+            
             rospy.on_shutdown(self.stop_and_clean_up)
-
-
-        
 
             rospy.Subscriber("/camera/image", Image, self.callback_image)
             rospy.Subscriber("/occupancy_grid_noroad", OccupancyGrid, self.occupCB)
@@ -118,6 +141,10 @@ class TurtleController:
 
 
     def stop_and_clean_up(self):
+        """
+            Called when we shutdown.
+        """
+
         cmd_twist = Twist()
 
         cmd_twist.angular.z = 0
@@ -128,7 +155,9 @@ class TurtleController:
 
 
     def turtle_to_odom(self, rel):
-        #Convert from turtle frame to odom fram
+        """
+            Convert from turtle frame to odom frame
+        """
         rel = self.pathplanner.grid_to_rel(rel)
         
         y = self.pos[1] + (math.sin(self.theta) * rel[0] + math.cos(self.theta) * rel[1])
@@ -136,7 +165,9 @@ class TurtleController:
         return (x,y)
     
     def odom_to_grid(self, odom):
-        #convert from odom frame to turtle(occup grid) frame
+        """
+            convert from odom frame to turtle(occup grid) frame
+        """
         x_prime = odom[0] - self.pos[0]
         y_prime = odom[1] - self.pos[1]
         rel_0 = x_prime * math.cos(self.theta) + y_prime * math.sin(self.theta)
@@ -144,7 +175,6 @@ class TurtleController:
         return self.pathplanner.rel_to_grid((rel_0, rel_1))
 
     def odomCB(self, msg:Odometry):
-        # print("Odom CB")
         w,x,y,z = msg.pose.pose.orientation.w, msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z 
         self.old_theta = self.theta
         self.old_pos = self.pos
@@ -167,6 +197,9 @@ class TurtleController:
 
 
     def make_cmd(self):
+        """
+            State machine based on the current step.
+        """
         cmd_twist = Twist()
 
         print("Step:", self.step)
@@ -175,7 +208,6 @@ class TurtleController:
             self.ang_vel = 0
 
         if self.step <= 1:
-
             if self.image is None or self.laser_scan is None:
                 rospy.logwarn("No image received!")
                 pass
@@ -209,7 +241,7 @@ class TurtleController:
                 rospy.logwarn("No image received!")
                 pass
             else:
-                if self.buffer <4:
+                if self.buffer < 4:
                     self.cmd_speed = 0.1
                     self.ang_vel = 0.0
                     self.buffer += 1
@@ -232,9 +264,7 @@ class TurtleController:
         else:
             pass
 
-
         cmd_twist.angular.z = self.ang_vel
-
 
         # speed pub
         self.cmd_vel_pub.publish(cmd_twist)
@@ -246,6 +276,10 @@ class TurtleController:
 
 
     def lidar_only(self):
+
+        """
+            Step 3 in the challenge (the corridor)
+        """
         
         Kp = (5.0, 6.0)[self.sim]
 
@@ -278,7 +312,7 @@ class TurtleController:
             dir = Kp * (dst_left-dst_right)
 
             
-            dir = min(10, max(-10, dir))
+            dir = min(10, max(-10, dir)) #idk why this is here lmao 10 is huge
 
             self.ang_vel = dir
         else:
@@ -291,9 +325,11 @@ class TurtleController:
         """
         Bresenham's line algorithm for fast voxel traversal
 
+        REPLACED BY skimage.draw.line (Faster)
+
         http://www.roguebasin.com/index.php/Bresenham%27s_Line_Algorithm
         """
-        x1,y1 = start
+        x1, y1 = start
         x2, y2 = end
 
         return (zip(*line(x1,y1,x2,y2)))
@@ -340,8 +376,9 @@ class TurtleController:
     
     def check_collision(self, cell_a, cell_b, margin=0):
         """
-        Checks whether the path between two cells
-        in the occupancy grid is collision free.
+            Checks whether the path between two cells
+            in the occupancy grid is collision free.
+            With a margin to account for the width of the turtlebot.
         """ 
         obstacles = []
 
@@ -351,7 +388,7 @@ class TurtleController:
             for cell in self.traverse_grid(cell_a_margin, cell_b_margin):
                 # print(cell, self.occupancy_grid[cell[0], cell[1]])
                 if (cell[0] * cell[1] < 0) or (cell[0] >= self.occupancy_grid.shape[0]) or (cell[1] >= self.occupancy_grid.shape[1]):
-                    print("oob")
+                    # print("oob")
                     continue
                 try:
                     if self.occupancy_grid[cell[0], cell[1]] == self.IS_OCCUPIED:
@@ -367,6 +404,11 @@ class TurtleController:
 
 
     def get_params(self, event=True):
+        
+        """
+            Update the parameters. This gets triggered when we change something in the GUI
+        """
+
         rospy.loginfo("Updating the parameters")
         try:
             try:
@@ -375,18 +417,25 @@ class TurtleController:
                 self.sim = False
 
             ## PARAMS   
-
+            
+            #Bottle order 
             self.order = rospy.get_param("/order", default=[0,1,2])
 
+
+            #Occup grid params
             self.CELLS_PER_METER = rospy.get_param("/occup_cellspermeter", default=50)
             self.IS_FREE = rospy.get_param("/occup_isfree", default=0)
             self.IS_OCCUPIED = rospy.get_param("/occup_osoccupied", default=100)
 
+
+            #Lane following
             self.road_maxwidth = rospy.get_param("/road_maxwidth", default=240)
             self.road_lane_offset = rospy.get_param("/road_lane_offset", default=0.3)
 
+            #Corridor
             self.inside_tunnel_thresh = rospy.get_param("/lidar_inside_tunnel_threshold", default=0.55)
 
+            #Path planning & bottles
             self.rrt_step = rospy.get_param("/rrt_step", default=6)
             self.rrt_radius = rospy.get_param("/rrt_radius", default=60)
             self.rrt_maxiters = rospy.get_param("/rrt_maxiters", default=400)
@@ -398,6 +447,8 @@ class TurtleController:
 
             self.ang_vel_clip = rospy.get_param("/ang_vel_clip", default=10.0)
 
+
+            #Stepline thresholds
             self.stepline_delay = rospy.get_param("/step_last_detection_threshold", default=6.0)
             self.stepline_upper_area = rospy.get_param("/step_upper_area_threshold", default=2400)
             self.stepline_lower_area = rospy.get_param("/step_lower_area_threshold", default=3200)
@@ -493,31 +544,20 @@ class TurtleController:
 
 
     def obstacle_detection(self):
+        """
+            We assume there to be two lanes, if there is an obstacle in our lane we just switch lanes.
+        """
 
         if self.occupancy_grid is None:
             return False
         
         current_pos = (self.occupancy_grid.shape[0]//2 - 1, 0)
-
-    
         goal_pos = (self.occupancy_grid.shape[0]//2 - 1, 12)
 
         obs = self.check_collision(current_pos, goal_pos, margin=4)
-    
-        # for cell in self.traverse_grid(current_pos, goal_pos):
-        #     if (cell[0] * cell[1] < 0) or (cell[0] >= self.occupancy_grid.shape[0]) or (cell[1] >= self.occupancy_grid.shape[1]):
-        #         continue
-        #     try:
-        #         if self.occupancy_grid[cell[0], cell[1]] == self.IS_OCCUPIED:
-        #             obs = True
-        #             break
-        #     except:
-        #         # print("Out of bounds")
-        #         obs = True
-        #         break
 
         if len(obs)>0:
-            # rospy.logwarn("O b stacle")
+            # rospy.logwarn("Obstaaaaaaacle")
             if not self.changing:
                 rospy.logwarn("chanign lanes")
                 self.lane = not self.lane #Switch lanes
@@ -531,28 +571,29 @@ class TurtleController:
 
     def lane_assist_controller(self):
 
+        # follow the lines 
+
         if self.left_lane is None or self.right_lane is None:
             return
     
         rows, cols = self.image.shape[:2]
         
         speed = self.max_speed
+
         if self.step == 4 and not self.sim:
             speed = 0.1
 
-        # print("left, right", self.left_lane, self.right_lane)
-
+        #Clip 
         if self.left_lane[1]> self.image.shape[1]//2:
             self.left_lane[1] = self.image.shape[1]
         if self.right_lane[1]< self.image.shape[1]//2:
             self.right_lane[1] = 0
 
-        # print("left, right", self.left_lane, self.right_lane)
 
         max_width = self.road_maxwidth
         offset = self.road_lane_offset
 
-        if self.step == 2:
+        if self.step == 2 and self.sim:
             max_width = 175
             offset = 0.25
 
@@ -564,30 +605,25 @@ class TurtleController:
             else:
                 
                 # print("left nan")
+                # If we're in the wrong lane, we want to go to the correct one
                 lanechange = (0.40,0.0)[self.lane]
                 center_of_road = self.right_lane[1] - (cols * (offset+lanechange))
 
-                
-
-        else:
+        else: #Left not NaN
             
             if np.isnan(self.right_lane[1]):
                 # print("right nan")
                 lanechange = (0.0,0.40)[self.lane]
                 center_of_road = self.left_lane[1] + (cols * (offset+lanechange))
 
-               
             else:
                 center_of_road = self.left_lane[1] + (self.right_lane[1] - self.left_lane[1])*0.5
                 
 
         # print("width ", self.right_lane[1] - self.left_lane[1], "\n")
 
-        
-
 
         if (self.right_lane[1] - self.left_lane[1]) > max_width and self.step < 4:
-            # print("left lane, cols", self.left_lane[1], cols*offset)
             if self.lane:
                 # print("Road split detected, following white line.")
                 center_of_road = self.right_lane[1] - (cols * offset)
@@ -603,9 +639,7 @@ class TurtleController:
         # self.error = max(min(10, self.error),-10)
 
         # print("error", self.error)
-
         # print("img shape", self.image.shape)
-
         # print("center of road", center_of_road)
 
 
@@ -615,7 +649,7 @@ class TurtleController:
         else:
             Kp = -0.02
 
-        self.cmd_speed =  speed #0.22
+        self.cmd_speed = speed 
         self.ang_vel = self.error * Kp
 
     #Function that warps the image
@@ -631,10 +665,8 @@ class TurtleController:
         return unwarped_img
 
     def preprocessing(self, img):
-
+        #Mask out lanes and stepline
         hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
-
-
         if self.sim:
             lower_yellow = np.array([self.left_H_l,self.left_S_l,self.left_V_l])
             upper_yellow = np.array([self.left_H_u,self.left_S_u,self.left_V_u])
@@ -666,14 +698,11 @@ class TurtleController:
             kernel = np.ones((15,15), np.uint8)
             mask_right = cv.morphologyEx(mask_stepline_inter, cv.MORPH_CLOSE, kernel)
 
-
-
-
         mask_frame = mask_left + mask_right
 
         return mask_left, mask_right
 
-    #Function that defines the polygon region of interest
+    # Select a certain region
     def regionOfInterest(self,img, polygon):
         mask = np.zeros_like(img)
         x1, y1 = polygon[0]
@@ -753,20 +782,6 @@ class TurtleController:
             return None, fit
 
 
-        # try:
-        #     left_fit = np.polyfit(lefty, leftx, 2)
-        #     print("left")
-        #     return left_fit, None
-        # except:
-        #     try:
-        #         right_fit = np.polyfit(righty, rightx, 2)
-        #         print("right")
-        #         return None, right_fit
-        #     except:
-        #         print("None")
-        #         return None, None
-
-
     def estimate_missing_lane(self, detected_fit, lane_side, lane_width_pixels):
         """
         Estimate the polynomial of the missing lane by shifting the detected lane's polynomial.
@@ -791,7 +806,7 @@ class TurtleController:
     def findPoints(self, img_shape, left_fit=None, right_fit=None):
         ploty = np.linspace(0, img_shape[0]-1, img_shape[0])
 
-        LANE_WIDTH_PIXELS = 610
+        LANE_WIDTH_PIXELS = 610 #adjust this for real life ?
         
         if left_fit is not None and right_fit is None:
             right_fit = self.estimate_missing_lane(left_fit, 'left', LANE_WIDTH_PIXELS)
@@ -820,7 +835,7 @@ class TurtleController:
         cv.fillPoly(img, np.int_([pts]), (255,0,255))
         return img
 
-
+    #Find radii of lanes to try and estimate a goal pos in the future
     def radiusOfCurvature(self,img, left_fit, right_fit):
         y_eval = img.shape[0]//2
         try:
@@ -844,18 +859,12 @@ class TurtleController:
         return avg_radius
 
 
-    def combine_vision_and_lidar(self, roadmap):
-        occup_grid = self.occupancy_grid
-
-        pass
-
 
     def second_process(self, image):
+        """
+            This takes the camera's image, warps it to make it a birdseye view, then extracts the lane to estimate a road lane occup grid.
+        """
         height, width, _ = image.shape
-
-        # polygon = [(int(width*0.05), int(height)), (int(width*0.3), int(height*0.7)), (int(width*0.7), int(height*0.7)), (int(0.95*width), int(height))]
-        # polygon = [(int(0), int(height)), (int(1), int(130)), (int(width-1), int(130)), (int(width), int(height))]
-        # masked_img = self.regionOfInterest(processed_img, polygon)
 
         if self.sim:
             source_points = np.float32([[101,140], [width-101,140], [-200,height], [width+200,height]])
@@ -868,14 +877,10 @@ class TurtleController:
         warped_img = self.warp(image, source_points, destination_points, warped_img_size)  
 
         left, right = self.preprocessing(warped_img)
-
-
     
         kernel = np.ones((41,41), np.uint8)
         opening_left = cv.morphologyEx(left, cv.MORPH_CLOSE, kernel)
         opening_right = cv.morphologyEx(right, cv.MORPH_CLOSE, kernel)
-
-
 
 
         warped_img_shape = (warped_img.shape)
@@ -886,14 +891,6 @@ class TurtleController:
         if left_fit is None and right_fit is None:
             print("no fit")
             return
-        
-        if left_fit is None:
-            center_fit = right_fit
-        elif right_fit is None:
-            center_fit = left_fit
-        else:
-            center_fit = (left_fit + right_fit) * 0.5
-
 
         pts_left, pts_right = self.findPoints(warped_img_shape, left_fit, right_fit)
 
@@ -905,13 +902,9 @@ class TurtleController:
 
 
         # self.avg_radius = self.radiusOfCurvature(warped_img, left_fit, right_fit)
-
         # print("RADIUS", self.avg_radius)
 
-
-
         road = self.warp(window1, source_points, destination_points, warped_img_size)
-
 
         # image_message = self.bridge.cv2_to_imgmsg(road, "passthrough")
         # self.image_pub.publish(image_message)
@@ -927,7 +920,7 @@ class TurtleController:
         road = cv.GaussianBlur(road,(11,11),0)
         road = cv.resize(road, (40,22))
 
-
+        #Because the camera doesn't see directly in front, we just tile the bottom to fill in the gap.
         last_row = road[-1,:,:]
         tiled = np.tile(last_row[np.newaxis, :, :], (6,1,1))
         road = np.vstack((road, tiled))
@@ -943,23 +936,17 @@ class TurtleController:
         )
         self.occupancy_grid2 = np.clip(self.occupancy_grid2, 0, 50)
 
+
+        #We merge the road lane occup grid with the obstacle occup grid to have a complete one.
         self.merge_occup_grids()     
-
-
-
-        
         pass
 
 
     def merge_occup_grids(self):
         
-
         lidar_occup = np.copy(self.occupancy_grid)
-
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
-
-        lidar_occup = signal.medfilt2d(lidar_occup, 3)
-
+        lidar_occup = signal.medfilt2d(lidar_occup, 3) #Noise reduction
 
         if self.sim:
             if self.step <= 2:
@@ -984,12 +971,6 @@ class TurtleController:
                 self.publish_occupancy_grid()
             else:
                 self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
-            # self.occupancy_grid2 = lidar_occup
-            # self.occupancy_grid2 = np.where(self.occupancy_grid2 >0 ,0, 100)
-
-            # padding_width = 1
-            # self.occupancy_grid2 = np.pad(occu, ((padding_width, 0), (padding_width, padding_width)), mode='constant', constant_values=100)
-
         
         else:
             self.occupancy_grid2 = np.bitwise_or(lidar_occup, self.occupancy_grid2)
@@ -1002,10 +983,10 @@ class TurtleController:
 
     def publish_occupancy_grid(self):
         """
-        Publish populated occupancy grid to ros2 topic
-        Args:
-            scan_msg (LaserScan): message from lidar scan topic
+        Publish populated occupancy grid to ros topic
         """
+        if self.occupancy_grid_pub.get_num_connections():
+            return
         oc = OccupancyGrid()
         oc.header.frame_id = "base_footprint"
         oc.header.stamp = rospy.Time.now()
@@ -1017,38 +998,18 @@ class TurtleController:
         self.occupancy_grid_pub.publish(oc)
         
 
-    def undistort(self, img, balance=0.3, dim2=None, dim3=None):
-        DIM = [320,240]
-        K = np.array([[95.06302, 0.04031, 159.22853],
-              [0., 95.154, 119.47541],
-              [0., 0., 1.]])  # Camera matrix
-        D = np.array([0.017580, 0.003274, -0.000498, -0.000042])  # Distortion coefficients
-
-        dim1 = img.shape[:2][::-1]  #dim1 is the dimension of input image to un-distort
-        assert dim1[0]/dim1[1] == DIM[0]/DIM[1], "Image to undistort needs to have same aspect ratio as the ones used in calibration"
-        if not dim2:
-            dim2 = dim1
-        if not dim3:
-            dim3 = dim1
-        scaled_K = K * dim1[0] / DIM[0]  # The values of K is to scale with image dimension.
-        scaled_K[2][2] = 1.0  # Except that K[2][2] is always 1.0
-        # This is how scaled_K, dim2 and balance are used to determine the final K used to un-distort image. OpenCV document failed to make this clear!
-        new_K = cv.fisheye.estimateNewCameraMatrixForUndistortRectify(scaled_K, D, dim2, np.eye(3), balance=balance)
-        map1, map2 = cv.fisheye.initUndistortRectifyMap(scaled_K, D, np.eye(3), new_K, dim3, cv.CV_16SC2)
-        undistorted_img = cv.remap(img, map1, map2, interpolation=cv.INTER_LINEAR, borderMode=cv.BORDER_CONSTANT)
-        return undistorted_img
-
-
     def process_image(self, image):
+        """
+            Find left and right lanes from image.
+        """
 
         self.image = np.copy(image)
-        
-        if self.step <= 4:
+
+        if self.step <= 4: #For the last challenge, we don't want to do this as it will be useless
+
             # Convert image to HSV colour space
             hsv = cv.cvtColor(image, cv.COLOR_BGR2HSV)
-
             rectangle = np.copy(hsv)
-
 
             if self.sim:
                 rectangle[:170, :, :] = 0
@@ -1076,8 +1037,6 @@ class TurtleController:
             upper_stepline2 = np.array([self.stepline2_H_u, self.stepline2_S_u, self.stepline2_V_u])
 
 
-
-
             # Create masks for left, right and stepline colours
             mask_left = cv.inRange(rectangle, lower_left, upper_left)
 
@@ -1089,9 +1048,9 @@ class TurtleController:
 
 
 
-            kernel = np.ones((15,15), np.uint8)
-            mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel)
-            mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel)
+            kernel = np.ones((15,15), np.uint8) 
+            mask_left = cv.morphologyEx(mask_left, cv.MORPH_CLOSE, kernel) #fill in mask
+            mask_right = cv.morphologyEx(mask_right, cv.MORPH_CLOSE, kernel) 
 
             rectangle = np.copy(hsv)
             if not self.sim:
@@ -1106,6 +1065,7 @@ class TurtleController:
             mask_stepline2 = cv.inRange(rectangle, lower_stepline2, upper_stepline2)
             mask_stepline_inter = cv.bitwise_or(mask_stepline1, mask_stepline2)
 
+            #Fill in mask
             mask_stepline_inter = cv.morphologyEx(mask_stepline_inter, cv.MORPH_CLOSE, kernel)
 
 
@@ -1120,13 +1080,14 @@ class TurtleController:
                 masked_left = cv.bitwise_and(image, rectangle, mask=mask_left)
                 masked_right = cv.bitwise_and(image, rectangle, mask=mask_stepline_inter)
 
-
-
             
-            # Combine masked images
-        
+            # Combine masked images        
             masked_frame = masked_left + masked_right
 
+
+
+
+            ## STEPLINE DETECTION
 
 
             if self.sim:
@@ -1141,7 +1102,7 @@ class TurtleController:
                 largest_contour = max(stepline_contour, key=cv.contourArea)
                 cv.drawContours(self.image, [largest_contour], -1, (0, 255, 0), 3)
 
-
+            #Find biggest contour 
             area = 0
             for i in stepline_contour:
                 stepline_area = cv.contourArea(i)
@@ -1150,36 +1111,32 @@ class TurtleController:
             
             stepline_area = area
 
-
-
             lower = self.stepline_lower_area
             upper = self.stepline_upper_area
 
-            # last_detection_threshold = (6,14)[self.sim and self.step == 2]
             last_detection_threshold = self.stepline_delay
             if self.step == 2 and self.sim:
-                last_detection_threshold = 13
-            
-            
-
+                last_detection_threshold = 13 #because the obstacles are red in sim, we need to artifically limit the min time between detections.
+             
 
             if (stepline_area > lower and stepline_area < upper):
                 if (not self.last_detection is None) and (((rospy.Time.now() - self.last_detection).to_sec()) < last_detection_threshold):
                     print("folse detekshion", self.last_detection.to_sec(), ((rospy.Time.now() - self.last_detection).to_sec()))
                     pass
                 else:
-                    self.detect_stepline = True
+                    self.detecting_stepline = True
             else:
-                if self.detect_stepline:
+                if self.detecting_stepline:
                     rospy.logwarn(f"STEP + 1")
                     self.step +=1
                     self.last_detection = rospy.Time.now()
-                    self.detect_stepline = False
-                    try:
-                        print((rospy.Time.now() - self.last_detection).to_sec())
-                    except:
-                        pass
+                    self.detecting_stepline = False
 
+
+
+
+
+            ## LANE FOLLOWING
 
             if self.sim:
                 contours_left, _ = cv.findContours(mask_left, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
@@ -1199,7 +1156,6 @@ class TurtleController:
 
 
             # Calculate the centroid of the largest contour
-
             if not self.left_lane is None:
                 M = cv.moments(left_lane)
             if M["m00"] != 0:
@@ -1232,53 +1188,51 @@ class TurtleController:
                 cv.circle(self.image, center_right, radius, colour2, thickness)
             # cv.circle(self.image, center_road, radius, colour2, 5)
 
-
-
             image_message = self.bridge.cv2_to_imgmsg(self.image, "passthrough")
             self.image_pub.publish(image_message)
 
-            
         else:
             pass
 
+
+
     def last_challenge(self):
+        """
+            THE BOTTLES 
+        """
 
         if self.occupancy_grid is None:
             rospy.logwarn("No occup grid")
             return
         
 
-        lidar_occup = np.copy(self.occupancy_grid.filled(0))
-
-        
-        kernel = np.ones((15,15), np.uint8)
-
-
-
+        lidar_occup = np.copy(self.occupancy_grid.filled(0)) #Masked array so we fill
         lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
-
-        lidar_occup = signal.medfilt2d(lidar_occup, 3)
+        lidar_occup = signal.medfilt2d(lidar_occup, 3) #Noise reduction
 
 
         
         self.occupancy_grid2 = np.zeros((lidar_occup.shape[0], lidar_occup.shape[1], 3), dtype=np.uint8)
-
         self.occupancy_grid2 = cv.cvtColor(self.occupancy_grid2, cv.COLOR_BGR2GRAY)
-        
-        self.pathplanner.set_image(self.occupancy_grid2)
+        self.pathplanner.set_occugrid(self.occupancy_grid2)
+        #We set the image to a full zero because we don't have the real occugrid yet but we use the shape for some calcs
 
+
+
+
+        ## BOTTLE DETECTION
 
 
         OccuGrid2 = (np.argwhere(lidar_occup == 100))
-        # n_clusters_ = 0
+        #Args where there's an obstacle
 
         if OccuGrid2.shape[0]: 
-
+            
+            #DB SCAN TO CLUSTER BOTTLE SHAPED OBSTACLES TOGETHER
             clustering = DBSCAN(eps=3, min_samples=10).fit(OccuGrid2)
             
             labels = clustering.labels_
             n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
-
             # print("clusters ", n_clusters_)
 
             unique_labels = set(labels)
@@ -1292,18 +1246,22 @@ class TurtleController:
                 #     col = [0, 0, 0, 1]
 
                 class_member_mask = labels == k
-
                 xy = OccuGrid2[class_member_mask & core_samples_mask]
+
                 # print("LEN XY", len(xy))
+                
+                #If we have toooooo many samples, it's probably not a bottle.
+
                 if len(xy)>0 and len(xy)<30:
                     x = round(np.mean(xy[:,0]))
                     y = round(np.mean(xy[:,1]))    
-
 
                     x, y = self.turtle_to_odom((x,y))
 
                     matched = False
 
+                    #This is basically a poor man's Kalman Filter. We estimate the bottles position based on the odometry of the robot, 
+                    #and if a detected bottle is close enough to that position, we consider them to be the same bottle.
                     for i in self.bottles:
                         x2, y2 = i.get_position()
                         distance = math.sqrt((x2 - x)**2 + (y2 - y)**2)
@@ -1311,6 +1269,9 @@ class TurtleController:
                             # print(f"matched with an existing bottle, distance: {distance}, pos : {x,y}")
                             i.set_position((x,y))
                             if not i.get_gate() is None:
+                                
+                                # We update the gate with the new detected position for the bottle.
+                                # This recomputes gate center and stuff.
                                 self.gates[i.get_gate()].update(self.bottles)
                             matched = True
                             break
@@ -1318,21 +1279,31 @@ class TurtleController:
                             continue
                     if not matched and not self.confirmed:
                         # print("new bottle discovered!", (x,y),)
+                        
+                        # we don't add new bottles if we already have 3 gates (ie self.confirmed = True)
                         self.bottles.append(Bottle(len(self.bottles), (x,y)))
+
                     # cv.circle(self.occupancy_grid2, [x,y], 4, (0,255,255), 4)
 
 
-        potential_neighbors = {}
-        neighbors = []
-        res_neighbors = {}
 
 
-        
 
-        target_distance = self.bottles_target_distance
-        tolerance = self.bottles_tolerance
+        ## GATE DETECTION
 
-        if not self.confirmed:
+        potential_neighbors = {} #A bottle can have multiple potential neighbors
+        neighbors = [] #Neighbors
+        res_neighbors = {} #"Reserved neighbors"
+
+
+    
+        target_distance = self.bottles_target_distance #Target gate width
+        tolerance = self.bottles_tolerance #Tolerance to that target gate width
+
+        if not self.confirmed: # If we already found the 3 gates we want, we don't bother
+
+            # STEP 1: FIND ALL THE BOTTLES THAT ARE WITHIN A CERTAIN RANGE OF EACH OTHER.
+
             for i in range(len(self.bottles)):
                 potential_neighbors[i] = []
                 for j in range(len(self.bottles)):
@@ -1343,24 +1314,67 @@ class TurtleController:
                         distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
                         # print("DISTANCE BETWEEN BOTTLES ", distance)
                         if abs(distance - target_distance) < tolerance:
-                            # print("DISTANCE ", distance, distance - target_distance)
-                            potential_neighbors[i].append(j)
-                            # print(i,j)
-                            
-            # print("potential", potential_neighbors)
+                            potential_neighbors[i].append(j) #The two bottles could be part of the same gate.
 
-            for i in potential_neighbors:
-                if len(potential_neighbors[i]) == 1:
-                    if len(potential_neighbors[potential_neighbors[i][0]]) == 1:
+
+            # STEP 2: TRY AND ASSIGN THE BOTTLES TOGETHER
+
+            """
+                IMAGINE THIS:
+                    A -- B   C -- D
+
+                    where AB and CD are gates, but B and C are also the right distance apart to be considered potential neighbors.
+
+                For bottle A, we check it's potential neighbor B.
+
+                A only has one potential neighbor, B. 
+
+                If B only had one potential neighbor, and that potential neighbor was A, then B and A are a gate.
+
+                However, B has multiple potential neighbors. (A and C).
+
+                Because A only has B, A becomes B's "reserved neighbor". 
+
+                Going through the bottles, we get the same thing for D and C, where D is C's reserved neighbor.
+                
+                So we end up with:
+
+                potential neighbors: {A: B; B: A,C; C: B, D; D:C}
+                reserved neighbors: {B: A, C:D}
+
+            """
+
+
+            for i in potential_neighbors:   
+                if len(potential_neighbors[i]) == 1: # Only one potential neighbor: 
+                    if len(potential_neighbors[potential_neighbors[i][0]]) == 1: 
+                        #If the other bottle also only has one potential neighbor,
+                        #We know that they can only be together
                         if potential_neighbors[potential_neighbors[i][0]][0] == i:
+                            #If both neighbors only have each other as potential neighbors, pair them up. 
                             # print(f"Neighbors found: {i}, {potential_neighbors[i]}")
-                            if not any(i in gate for gate in neighbors):
+                            if not any(i in gate for gate in neighbors): 
+
+                                # If we haven't already assigned them (B with A then A with B is the same gate)
                                 neighbors.append((i, potential_neighbors[i][0]))
                     else: 
+                        #The other bottle is "ambiguous". But because bottle i only has one potential neighbor, it becomes a reserved neighbor of the other bottle.
                         try:
                             res_neighbors[potential_neighbors[i][0]].append(i)
                         except:
                             res_neighbors[potential_neighbors[i][0]] = [i]
+
+
+            """
+                continuing, we see that B only has one reserved neighbor. As such, B must be with A, otherwise A would not have any neighbors.
+
+                This also means C and D are together. 
+
+                We end up with A--B and C--D, which is the correct pairing. 
+
+                If we only had three bottles: A -- B -- C, we couldn't know which pair is the correct one.
+            
+            """
 
             for i in res_neighbors:
                 if len(res_neighbors[i])==1:
@@ -1369,7 +1383,11 @@ class TurtleController:
                     pass
                     # print(f"ambiguity for {i}")
 
-            # print("neighbors:", neighbors)
+            
+
+            """
+                Now that we have our neighbors, we asssign them to gates.
+            """
 
 
             for i in neighbors:
@@ -1384,35 +1402,46 @@ class TurtleController:
                 cX = np.mean([c1[0],c2[0]])
                 cY = np.mean([c1[1],c2[1]])
 
-                # self.occupancy_grid2[cX,cY] = 127
-
+ 
                 self.bottles[i[0]].set_gate(len(self.gates))
                 self.bottles[i[1]].set_gate(len(self.gates))
 
                 self.gates.append(Gate(center_position=(cX,cY), bottle_index1=self.bottles[i[0]].get_index(), bottle_index2=self.bottles[i[1]].get_index()))
                 # cv.circle(self.occupancy_grid2, [cX,cY], 2, (0,255,0), 3)
-        nb = {}
+        
+
+        nb = {} #This is the number of bottles that are currently assigned to this gate. 
+
+        """
+            During a normal detection phase, it can happen that obstructions prevent us from seeing all the bottles, and we thus end up with an erroneous pairing.
+
+            As we continue exploring, we discover new bottles and remap the gates. This however means that we end up with old gates that are no longer used. 
+
+            Because a lot of the IDs of gates and bottles are just their index, it is best to keep them in the lists.
+        """
 
         for g in range(0,len(self.gates)):
-            nb[g] = 0
+            nb[g] = 0 #Number of bottles assigned to each gate
 
 
         for i in self.bottles:
-            # print(i.get_position())
             if not i.get_gate() is None:
                 try:    
-                    nb[i.get_gate()] += 1
+                    nb[i.get_gate()] += 1 #the gate "i.get_gate()" has one additional bottle that is assigned to it.
 
                     if self.gates[i.get_gate()].get_colour() == self.order[self.current_index] and self.found_colours:
+
+                        # If the gate is the color we want to go through, we don't do anything
                         pass
                         # print("Opened target gate")
                     else:
-                        # self.occupancy_grid2[self.gates[i.get_gate()].get_center_pos()[0], self.gates[i.get_gate()].get_center_pos()[1]] = 127
+
+                        # If the gate is not the one we want to go through, we draw a line between the bottles to "close it"
                         b1,b2 = self.gates[i.get_gate()].get_bottles_indices()
+
+                        # "closing" a gate is just drawing a line between the bottles on the occupancy grid, which makes it look like an obstacle.
                         cells = list(self.traverse_grid(self.odom_to_grid(self.bottles[b1].get_position()), self.odom_to_grid(self.bottles[b2].get_position())))
-                        # print(b1, b2)
-                        # print(self.odom_to_grid(self.bottles[b1].get_position()))
-                        # print(self.odom_to_grid(self.bottles[b2].get_position()))
+                        
                         for c in cells:
                             try:
                                 self.occupancy_grid2[c[0],c[1]] = 127
@@ -1422,20 +1451,16 @@ class TurtleController:
                     pass
             try:
                 pos = self.odom_to_grid(i.get_position())
-                self.occupancy_grid2[pos[0],pos[1]] = 100
+                self.occupancy_grid2[pos[0],pos[1]] = 100 #We add the bottles to the occupancy grid (it might not be seen by the LiDAR, but it still has to be shown)
             except:
                 pass
-            # cv.circle(occu_grid35, [i.get_position()[0],i.get_position()[1]], 1, (0,255,0), 2)  
+        
+
+        #Active gates are gates which have two bottles currently assigned to them. 
 
         self.active_gates = [key for key, value in nb.items() if value == 2]
 
-        # for i in self.active_gates:
-        #     p1, p2 = self.gates[i].get_offset_points()
-        #     if p1 is None or p2 is None:
-        #         continue
-        #     self.occupancy_grid2[round(p1[0]), round(p1[1])] = 66
-        #     self.occupancy_grid2[round(p2[0]), round(p2[1])] = 66
-
+        #If we have three active gates, we have found all the gates we want and can thus lock those in.
         if len(self.active_gates) == 3 and not self.confirmed:
             self.confirmed = True
             rospy.logwarn("found all gates!")
@@ -1446,15 +1471,23 @@ class TurtleController:
         # print("nb bottles: ", len(self.bottles))
 
         self.merge_occup_grids()
-        self.last_challenge2()
+        self.gate_colours()
         pass
 
-    def last_challenge2(self):
+
+        
+    def gate_colours(self):
+        """
+            This assigns colours to the gates we have, and decides which point we should go to.
+        """
 
         goal_point = None
 
-        self.image_rect = np.copy(self.cv_image_rect)
 
+        ## MASKING COLOURS
+
+
+        self.image_rect = np.copy(self.cv_image_rect)
 
         try:
             hsv = cv.cvtColor(self.cv_image_rect, cv.COLOR_BGR2HSV)
@@ -1478,19 +1511,22 @@ class TurtleController:
         mask_blue = cv.inRange(hsv, BlueBottle_l, BlueBottle_u)
         mask_green = cv.inRange(hsv, GreenBottle_l, GreenBottle_u)
 
+    
+
         contours_blue, _ = cv.findContours(mask_blue, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         contours_green, _ = cv.findContours(mask_green, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         contours_yellow, _ = cv.findContours(mask_yellow, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
 
 
         # threshold = (6000, 200)[self.sim]
-        threshold = self.bottles_area_threshold
-
-
+        threshold = self.bottles_area_threshold #Minimum contour area for it to be a bottle.
 
         yellow_bottles = []
         green_bottles = []
-        blue_bottles = []
+        blue_bottles = []       
+
+
+        #For each contour, if it is above the threshold, we consider it to be a bottle of that color
 
         for i in contours_blue:
             if cv.contourArea(i) > threshold:
@@ -1523,9 +1559,9 @@ class TurtleController:
                 cv.drawContours(self.image_rect, [i], -1, (20, 20, 255), 3)
 
         #0 blue, 1 green, 2 yellow
-        gates = {0:[None, None], 1:[None, None], 2:[None, None]}
+        gates = {0:[None, None], 1:[None, None], 2:[None, None]} #Each gate has a center error and avg area
 
-        if len(yellow_bottles) == 2:
+        if len(yellow_bottles) == 2: #we are seeing two yellow bottles.
             avg_area_yellow = (yellow_bottles[0][2] + yellow_bottles[1][2]) * 0.5
             center_yellow = (yellow_bottles[0][1] + 0.5*(yellow_bottles[1][1] - yellow_bottles[0][1]))
 
@@ -1533,7 +1569,7 @@ class TurtleController:
 
             gates[2] = [offcenter_yellow, avg_area_yellow]
         
-        if len(blue_bottles) == 2:
+        if len(blue_bottles) == 2: #we are seeing two blue bottles.
             avg_area_blue = (blue_bottles[0][2] + blue_bottles[1][2]) * 0.5
             center_blue = (blue_bottles[0][1] + 0.5*(blue_bottles[1][1] - blue_bottles[0][1]))
 
@@ -1541,17 +1577,24 @@ class TurtleController:
 
             gates[0] = [offcenter_blue, avg_area_blue]
         
-        if len(green_bottles) == 2:
+        if len(green_bottles) == 2: #we are seeing two green bottles.
             avg_area_green = (green_bottles[0][2] + green_bottles[1][2]) * 0.5
             center_green = (green_bottles[0][1] + 0.5*(green_bottles[1][1] - green_bottles[0][1]))
 
             offcenter_green = center_green - (self.image_rect.shape[1] * 0.5)
 
-            gates[1] = [offcenter_green, avg_area_green]
+            gates[1] = [offcenter_green, avg_area_green]   
+
+        
+        possible_pairing = {0: [], 1: [], 2: []} #Possible pairing of colours to gates.
 
 
-        possible_pairing = {0: [], 1: [], 2: []}
 
+        """
+            We look through all the active gates (the ones with 2 bottles assigned to them) and figure out if the 
+            gate is supposed to be in front of us, as in, should it be visible on the camera.
+        
+        """
         for i in self.active_gates:
             if self.gates[i].get_colour() is None:
                 center = self.odom_to_grid(self.gates[i].get_center_pos())
@@ -1564,36 +1607,44 @@ class TurtleController:
                         if value[0] is None:
                             continue
                         else:
-                            if abs(value[0] - angle*10) < 30:
+                            if abs(value[0] - angle*10) < 30: #If the gate we see (Camera) is in front, and the active gate (LiDAR) is in front too, they might be the same
                                 possible_pairing[key].append(i)
 
         for colour, gate in possible_pairing.items():
-            if len(gate) == 1:
+            if len(gate) == 1: #If there is a match (and no ambiguity)
                 rospy.logwarn(f"FOUND colour FOR GATE {gate}, colour IS {colour}")
-                self.gates[gate[0]].set_colour(colour, self.bottles)
+                self.gates[gate[0]].set_colour(colour, self.bottles) #This also sets all the bottles colours.
 
         # for gate in self.active_gates:
         #     print(gate, self.gates[gate].get_colour())
 
-
-
+        """
+            The last challenge uses a 3 state SM. 
+            State 0 is when all gates and their colour have not been found .
+            State 1 is traveling between locations.
+            State 2 is transiting through a gate.
+        """
 
         if self.state == 0:
-            colours = [0,1,2]
+
+            colours = [0,1,2] #All the colours that we need to assign
             unassigned_gates = []
 
             for i in self.active_gates:
                 if not self.gates[i].get_colour() is None:
-                    colours.remove(self.gates[i].get_colour())
+                    colours.remove(self.gates[i].get_colour()) #A gate has that colour, so we dont need to assign that colour anymore
                 else:
-                    unassigned_gates.append(i)
+                    unassigned_gates.append(i) # This gate doesn't have an assigned colour.
 
 
             # print("remaingin colours, unassigned_gates ", colours, unassigned_gates)
 
+            """
+                If we have three gates, three colours, and we know the colour of 2 gates, we can deduce the last one.
+            """
 
-            if len(colours) == 1 and len(unassigned_gates) == 1:
-                rospy.logwarn(f"FOUND REMAINING colour FOR GATE {unassigned_gates[0]}, colour IS {colours[0]}")
+            if len(colours) == 1 and len(unassigned_gates) == 1: 
+                rospy.logwarn(f"DEDUCED REMAINING COLOUR FOR GATE {unassigned_gates[0]}, COLOUR IS {colours[0]}")
                 self.gates[unassigned_gates[0]].set_colour(colours[0], self.bottles)
             elif len(colours) == 1:
                 for i in self.bottles:
@@ -1605,6 +1656,21 @@ class TurtleController:
             points = []
             distances = []
             indices = []
+
+            """
+                If we haven't found all colours yet, we look at which gate is the closest and go to it.
+
+                A gate's "offset points" are two points which are offset from the center
+
+                To go through a gate, we go from one to the other. To observe a gate, we go to one and turn to the gate.
+
+                   o
+                A --- B
+                   o 
+
+                The offset points are the "o" in the above diagram.
+            """
+            
             if len(colours) > 0:
                 # print("Not found the one we want yet. We'll explore a bit.")
                 for i in self.active_gates:
@@ -1616,40 +1682,46 @@ class TurtleController:
                             indices.append(i)
                             
             else:
+                # we have found all colours.
                 for i in self.active_gates:
+
+                    # We want to go to the colour that is next in the order
                     if self.gates[i].get_colour() == self.order[self.current_index]:
-                        # print("GOING TO THE CORRECT ONE!")
                         self.found_colours = True
                         self.state = 1
                         goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
                         self.target_gate = i
 
             if len(points)>0:
-                # print("Closest point :" , points[np.argmin(distances)])
-                self.target_gate = indices[np.argmin(distances)]
-                goal_point = points[np.argmin(distances)]
+                self.target_gate = indices[np.argmin(distances)] #Go to closest
+                goal_point = points[np.argmin(distances)] #Go to closest
 
 
         elif self.state == 1:
             for i in self.active_gates:
                     if self.gates[i].get_colour() == self.order[self.current_index]:
-                        # print("GOING TO THE CORRECT ONE!")
                         self.found_colours = True
                         self.state = 1
                         goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
                         self.target_gate = i
             goal_point = self.closest_point(self.gates[self.target_gate].get_offset_points())[0]
         elif self.state == 2:
-            goal_point = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)[0]
-        # elif self.state == 1:
-        #     goal_point = self.closest_point(self.gates[i].get_offset_points())[0]
-        # elif self.state == 2:
-        #     #Get opposite point
-        #     goal_point = self.closest_point(self.gates[i].get_offset_points(), closest=False)[0]
+            """
+                STATE 2 is when you reached a gate, and want to go to the other side. So you're at one offset point, and you want to go to the other offset point.
 
+                   x
+                A --- B
+                   o
+
+                the closest point function has a "closest=False" argument which means it returns the farthest one.
+            """
+            goal_point = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)[0]
+        
         image_message = self.bridge.cv2_to_imgmsg(self.image_rect, "passthrough")
         self.image_pub.publish(image_message)
 
+
+        # if we have a goal
         if not goal_point is None:
             self.path_planning(goal_point)
 
@@ -1657,10 +1729,13 @@ class TurtleController:
 
 
     def closest_point(self, points, closest=True):
-        
+
+        """
+            return closest (or fathest) point between two. (with the distance)
+        """
+
         point1 = self.odom_to_grid(points[0])
         point2 = self.odom_to_grid(points[1])
-
         
 
         # local_center = (self.occupancy_grid.shape[1] - center[0], center[1] - 0.5*self.occupancy_grid.shape[0])
@@ -1684,30 +1759,34 @@ class TurtleController:
             
     def path_planning(self, goal):
 
+        """
+            uses RRT* to plan a path.
+        """
+
 
         goal = np.array(goal, dtype=np.int16)
 
-        # print("state ", self.state)
 
-        self.cmd_speed = self.max_speed - 0.1
+        self.cmd_speed = self.max_speed - 0.1 #Don't go too fast
 
+
+        # Often, the goal is outside the occupancy grid.
         if goal[1] >= self.occupancy_grid.shape[0]:
             goal[1] = self.occupancy_grid.shape[0]-1
         if goal[0] >= self.occupancy_grid.shape[1]:
                 goal[0] = self.occupancy_grid.shape[1]-1
 
-        # print("GOAL", goal, self.occupancy_grid.shape, self.occupancy_grid2.shape)
+        
+        """
+            To navigate around obstacles, we make an occupancy grid which includes the obstacles, bottles and gates.
+
+            The gates we don't want to go through are closed off. We inflate the occupancy grid because the path planning considers the robot to have a width of 0.
+            Inflating the obstacles by at least half of the robot's radius means we shouldn't hit them.
+        """
 
         lidar_occup = np.copy(self.occupancy_grid2)
-
-        # lidar_occup = np.transpose(np.rot90(lidar_occup, k=2, axes=(1,0)))
-
-        # lidar_occup = signal.medfilt2d(lidar_occup, 3)
-
         occu_grid_cp = (lidar_occup > 95)
 
-
-        # Create a structuring element (disk) corresponding to half the robot's width
         selem = disk(3)  # 'radius' should be set to half the robot's width in pixels
 
         # Dilate the obstacle map
@@ -1715,21 +1794,24 @@ class TurtleController:
         inflated_obstacles = np.where(inflated_obstacles, 0, 100)
 
 
-        self.pathplanner.set_image(inflated_obstacles)
-
-        self.occupancy_grid2 = inflated_obstacles
-
-        self.publish_occupancy_grid()
+        #We set the RRT* to that.
+        self.pathplanner.set_occugrid(inflated_obstacles)
 
 
-        # print("starting path planning")
+        #This can be uncommented to visualize the inflated obstacles. 
+        #self.occupancy_grid2 = inflated_obstacles
 
+        self.publish_occupancy_grid() #only for visualization.
+
+        
+        # RUN RRT*
         goals = self.pathplanner.plan(goal)
-        # print("waypoints : ", goals)
+
+
         waypoint = goals[1]
 
         if waypoint is None:
-            # self.cmd_speed = 0
+            #This happens when the gate gets closed while we're still inside it, and we thus need to move out of it.
             local_waypoint = np.array((10, 0))
         else:
             local_waypoint = np.array((self.occupancy_grid2.shape[0] - waypoint[0], waypoint[1] - 0.5 * self.occupancy_grid2.shape[1]))
@@ -1737,7 +1819,11 @@ class TurtleController:
         distance = np.linalg.norm(local_waypoint)
 
         # print(f"Distance to waypoint {distance}, state {self.state}, current index {self.current_index}")
+
         if self.state == 2 and not self.target_gate is None:
+            """
+                If we're transiting a gate, check our distance to the gate center to determine if we passed through.
+            """
             if (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[0] - self.occupancy_grid.shape[1] ) < 6) and (abs(self.odom_to_grid(self.gates[self.target_gate].get_center_pos())[1] - (self.occupancy_grid.shape[0] * 0.5) ) < 6):
                 rospy.logwarn("TRANSITED")
                 self.transited_gates += 1
@@ -1745,7 +1831,9 @@ class TurtleController:
                 self.current_index += 1
 
         if distance < 5.0 and not self.found_colours:  
-
+            """
+                We need to observe this gate. So just spin in circles until you see it.
+            """
             target_point, _ = self.closest_point(self.gates[self.target_gate].get_offset_points(), closest=False)
             # print("Target point: ", target_point)
             heading = math.atan2(target_point[1], target_point[0])
@@ -1757,19 +1845,22 @@ class TurtleController:
 
 
         elif distance < 5.0 and self.found_colours and not self.state==2:
-            # print("Transitting.")
+            """
+                We traveled to the gate's first offset point and now want to cross that gate.
+            """
             self.state = 2
 
         elif not distance < 5.0:
+
+            """
+                We are going to the next gate.
+            """
             heading = math.atan2(local_waypoint[1], local_waypoint[0])
 
-            # print("DISTANDHEADINIG", distance, heading)
 
             for i in goals[1:]:
                 pass
                 # self.occupancy_grid2[int(i[0]),int(i[1])] = 0
-
-            
             
             Kp = (-1.5, -1.5)[self.sim]
             if abs(heading) > (0.3,0.6)[self.sim]:

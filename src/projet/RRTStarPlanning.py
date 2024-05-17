@@ -5,6 +5,13 @@ import rospy
 from skimage.draw import line
 
 
+"""
+    Classes to handle RRT* path planning, used for the bottle challenge.
+    It uses an occupancy grid to plan around the obstacles.
+"""
+
+
+
 class Nodes:
     def __init__(self, x,y):
         self.x = x
@@ -15,7 +22,7 @@ class Nodes:
 
 class RRTStarPlanning:
     def __init__(self, stepSize=4, radius=20, max_iters=600, cpm=50, is_occupied=0):
-        self.img = None
+        self.occugrid = None
         self.radius = radius
         self.stepSize= stepSize
         self.max_iters = max_iters
@@ -23,27 +30,36 @@ class RRTStarPlanning:
         self.occup = is_occupied
         self.busy = False
 
-    def set_image(self, img):
+    def set_occugrid(self, occugrid):
+        
+        """
+            Save the occu grid which contains the obstacles.
+        """
+        
         if self.busy:
             return
-        self.img = img
-        self.start = (self.img.shape[0]-1, img.shape[1]//2)
+        self.occugrid = occugrid
+
+        #The turtlebot is at this position, as this is how the occugrid is made.
+        self.start = (self.occugrid.shape[0]-1, occugrid.shape[1]//2)
+    
 
     def plan(self, end):
-        if self.img is None:
+        if self.occugrid is None:
             return [None]
         self.node_list = [0]
         self.end = end
         return self.RRT()
     
     def rel_to_grid(self, rel):
-        x = (self.img.shape[0]-1) - (rel[0]*self.cpm)
-        y = (self.img.shape[1]//2) - (rel[1]*self.cpm)
+        """ transform from relative to occugrid """
+        x = (self.occugrid.shape[0]-1) - (rel[0]*self.cpm)
+        y = (self.occugrid.shape[1]//2) - (rel[1]*self.cpm)
         return (int(x),int(y))
     
     def grid_to_rel(self, grid):
-        x = (self.img.shape[0]-1 - grid[0])/self.cpm
-        y = ((self.img.shape[1]//2) - grid[1])/self.cpm
+        x = (self.occugrid.shape[0]-1 - grid[0])/self.cpm
+        y = ((self.occugrid.shape[1]//2) - grid[1])/self.cpm
         return (x, y)
     
     def collision(self, x1, y1, x2, y2):
@@ -51,18 +67,22 @@ class RRTStarPlanning:
         discrete_line = (zip(*line(x1,y1,x2,y2)))
         for point in discrete_line:
             try:
-                if self.img[point[0], point[1]] == self.occup:  # Assuming obstacle is white
+                if self.occugrid[point[0], point[1]] == self.occup:  # Assuming obstacle is white
                     return True
             except:
                 continue
         return False
 
     def check_collision(self, x1,y1,x2,y2):
-        hx,hy=self.img.shape
+
+        """ Check path between two nodes. """
+
+        hx,hy=self.occugrid.shape
         if y1<0 or y1>hy or x1<0 or x1>hx:
             directCon = False
             nodeCon = False
         else:
+            #First check if we can reach the goal directly.
             if self.collision(x1,y1,self.end[0],self.end[1]):
                 directCon = False
             else:
@@ -70,7 +90,7 @@ class RRTStarPlanning:
 
                 # Threshold distance from last point to goal (optional)
                 if dst > self.stepSize*2:
-                    directCon = True
+                    directCon = True # You would set this to false to not have a direct path to the goal.
                 else:
                     directCon= True
 
@@ -92,11 +112,17 @@ class RRTStarPlanning:
         dist = math.sqrt( ((n2.x-n1.x)**2)+((n2.y-n1.y)**2) )
         return dist
     
-
+    # returns all the nodes within a certain radius
     def near_nodes(self, new_node):
         return [node for node in self.node_list if self.distance(node, new_node) < self.radius]
 
+
     def best_parent(self, nx, ny):
+
+        """
+            Returns the lowest cost parent (thats how RRT* works)
+        """
+
         best_cost = float('inf')
         best_node = None
         next_node = Nodes(nx, ny)
@@ -115,6 +141,7 @@ class RRTStarPlanning:
                 # print("cost", cost, best_cost)
         return best_node, best_cost
     
+    # Rewire path to lower cost altertnative
     def rewire(self, new_node, near_nodes):
         for node in near_nodes:
             cost_via_new_node = new_node.cost + self.distance(new_node, node)
@@ -151,12 +178,13 @@ class RRTStarPlanning:
 
     def RRT(self):
 
-        h,l= self.img.shape # dim of the loaded image
+        h,l= self.occugrid.shape # dim of the occu grid
 
-        if self.img[self.start[0], self.start[1]] == self.occup:
+        if self.occugrid[self.start[0], self.start[1]] == self.occup:
+            #ie. we are in an obstacle
             return [None, None]
         
-        # if self.img[self.end[0], self.end[1]] == 0:
+        # if self.occugrid[self.end[0], self.end[1]] == 0:
         #     print("END IS COLLISION")
         #     return [None, None]
 
@@ -181,18 +209,27 @@ class RRTStarPlanning:
             if loop > 40:
                 # print("MAX LOOP")
                 return [None, None]
-            
+
+            """
+                Pick a random point. Make a branch from the closest node, in the direction of the random point, of a fixed distance.
+
+                Then take the new node and check the fastest way to get there without hitting obstacles. Also check if this node can help reduce costs for other nodes.
+            """
+
+
             nx,ny = self.rnd_point(h,l)
             
             nearest_ind = self.nearest_node(nx,ny)
             nearest_x = self.node_list[nearest_ind].x
             nearest_y = self.node_list[nearest_ind].y
 
+
+        
             _,theta = self.dist_and_angle(nearest_x,nearest_y,nx,ny)
             tx=int(nearest_x + self.stepSize*np.cos(theta))
             ty=int(nearest_y + self.stepSize*np.sin(theta))
             
-            if ty<0 or ty>self.img.shape[1]-1 or tx<0 or tx>self.img.shape[0]-1:
+            if ty<0 or ty>self.occugrid.shape[1]-1 or tx<0 or tx>self.occugrid.shape[0]-1:
                 loop += 1
                 # print("bounds")
                 continue
@@ -210,6 +247,7 @@ class RRTStarPlanning:
 
             
             if directCon and nodeCon:
+                #We can directly go to the end
                 self.node_list.append(i)
                 self.node_list[i] = Nodes(tx,ty)
 
@@ -243,13 +281,14 @@ class RRTStarPlanning:
                 self.node_list[nearest_ind].children.append(self.node_list[i])
                 self.node_list[i].cost = new_cost
 
+
+                #Check to see if you can lower the travel costs.
                 self.rewire(self.node_list[i], self.near_nodes(self.node_list[i]))
                 i += 1
                 loop = 0
                 continue
 
             else:
-                # print("no cin")
                 loop += 1
                 continue
     
