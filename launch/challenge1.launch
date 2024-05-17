@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+
+<include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(find projet)/worlds/Projet2024_og.world"/>
+    <arg name="paused" value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="true"/>
+    <arg name="headless" value="false"/>
+    <arg name="debug" value="false"/>
+  </include>
+
+
+ <!-- Spwan turtlebot in Gazebo -->
+
+<rosparam command="load" file="$(find projet)/params/simu_paramsw_1.yaml" />
+
+<include file="$(find projet)/launch/common_launch.launch"/>
+
+
+<!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find projet/rviz/turtlebot.rviz"/> -->
+
+</launch>

@@ -136,6 +136,9 @@ class LidarProcess:
 
     def callback(self, data:LaserScan) :
 
+        if not self.pub.get_num_connections():
+            rospy.logwarn("Not publishing LiDAR, no subscribers!")
+            return
 
         """ Callback function called when a message is received on the subscribed topic"""
 
@@ -180,11 +183,14 @@ class LidarProcess:
 
         lidar_data.ranges = data_filtered
 
-
+        self.pub.publish(lidar_data)
+        
+        if not self.occupancy_grid_pub.get_num_connections():
+            rospy.logwarn("Not publishing Occupancy grid, no subscribers!")
+            return
         self.populate_occupancy_grid(data_filtered, data.angle_increment)
         self.publish_occupancy_grid()
 
-        self.pub.publish(lidar_data)
 
     def crop_data(self, data:list, angle_increment) :
 

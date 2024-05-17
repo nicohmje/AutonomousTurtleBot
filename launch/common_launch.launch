@@ -1,17 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <launch>
 
-<include file="$(find gazebo_ros)/launch/empty_world.launch">
-    <arg name="world_name" value="$(find projet)/worlds/Projet2024_og.world"/>
-    <arg name="paused" value="false"/>
-    <arg name="use_sim_time" value="true"/>
-    <arg name="gui" value="true"/>
-    <arg name="headless" value="false"/>
-    <arg name="debug" value="false"/>
-  </include>
 
-
- <!-- Spwan turtlebot in Gazebo -->
 
 <param name="robot_description" command="$(find xacro)/xacro $(find projet)/urdf/turtlebot3.urdf.xacro " />
 
@@ -20,7 +10,11 @@
 
 
 <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher"/>
-<include file="$(find projet)/launch/simu_process.launch"/>
+
+<rosparam command="load" file="$(find projet)/calib/simu_colours.yaml" />
+<rosparam command="load" file="$(find projet)/calib/last_sim_colours.yaml" />
+
+
 <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher"/>
 
 
@@ -36,9 +30,7 @@
     
   </node>
 
+<node pkg="projet" type="TurtleBotController.py" name="TurtleBotController" output="screen"/>
 
-
-
-<!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find projet/rviz/turtlebot.rviz"/> -->
 
 </launch>

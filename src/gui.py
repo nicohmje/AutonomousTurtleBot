@@ -5,6 +5,19 @@ import tkinter as tk
 from functools import partial
 import yaml  # Import the yaml library
 
+
+"""
+    GUI TO SET LANE AND STEPLINE COLOURS
+"""
+
+
+
+
+
+
+
+
+
 class ParameterSetterGUI:
     def __init__(self, master):
         # ROS Node and Publisher Setup
@@ -82,6 +95,11 @@ class ParameterSetterGUI:
         self.write_to_yaml()  # Call the function to write updates to the YAML file
 
     def write_to_yaml(self):
+
+        """
+            We update the calib files.
+        """
+
         current_values = {param: slider.get() for param, slider in self.sliders.items()}
         if self.sim:
             with open('../calib/simu_colours.yaml', 'w') as file:

@@ -5,7 +5,7 @@
 
 <rosparam command="load" file="$(find projet)/calib/real_colours.yaml" />
 <rosparam command="load" file="$(find projet)/calib/last_real_colours.yaml" />
-<rosparam command="load" file="$(find projet)/calib/real_params.yaml" />
+<rosparam command="load" file="$(find projet)/params/real_params.yaml" />
 
 
 <node pkg="image_proc" type="image_proc" name="image_proc" output="screen">

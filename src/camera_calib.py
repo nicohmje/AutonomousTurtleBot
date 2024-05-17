@@ -7,6 +7,13 @@ import yaml
 from sensor_msgs.msg import CameraInfo, Image
 
 
+"""
+    Load camera calibration for the simulation. We calibrated the camera manually in gazebo.
+"""
+
+
+
+
 class CameraCalib():
     def __init__(self): 
         self.camera_info = None
