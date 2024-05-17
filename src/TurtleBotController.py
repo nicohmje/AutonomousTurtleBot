@@ -1116,7 +1116,7 @@ class TurtleController:
 
             last_detection_threshold = self.stepline_delay
             if self.step == 2 and self.sim:
-                last_detection_threshold = 13 #because the obstacles are red in sim, we need to artifically limit the min time between detections.
+                last_detection_threshold = 13.3 #because the obstacles are red in sim, we need to artifically limit the min time between detections.
              
 
             if (stepline_area > lower and stepline_area < upper):

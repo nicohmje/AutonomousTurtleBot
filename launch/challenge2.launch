@@ -11,7 +11,7 @@
   </include>
 
 
-<rosparam command="load" file="$(find projet)/calib/simu_paramsw_2.yaml" />
+<rosparam command="load" file="$(find projet)/params/simu_paramsw_2.yaml" />
 
 <include file="$(find projet)/launch/common_launch.launch"/>
 

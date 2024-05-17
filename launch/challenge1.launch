@@ -13,7 +13,7 @@
 
  <!-- Spwan turtlebot in Gazebo -->
 
-<rosparam command="load" file="$(find projet)/calib/simu_paramsw_1.yaml" />
+<rosparam command="load" file="$(find projet)/params/simu_paramsw_1.yaml" />
 
 <include file="$(find projet)/launch/common_launch.launch"/>
 
