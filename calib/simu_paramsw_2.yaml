@@ -1,11 +1,11 @@
-order: [2,1,0]
+order: [1,0,2]
 
 road_maxwidth: 240
 road_lane_offset: 0.3
 
-step_last_detection_threshold: 14
-step_lower_area_threshold: 2400
-step_upper_area_threshold: 3200
+step_last_detection_threshold: 6
+step_lower_area_threshold: 2100
+step_upper_area_threshold: 3400
 
 lidar_inside_tunnel_threshold: 0.55
 
@@ -19,7 +19,7 @@ rrt_maxiters: 400
 
 bottles_same_bottle_threshold: 0.06
 bottles_area_threshold: 200
-bottles_target_distance: 0.46
+bottles_target_distance: 0.5
 bottles_tolerance: 0.06
 
 ang_vel_clip: 2.0

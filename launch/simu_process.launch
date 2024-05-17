@@ -4,7 +4,7 @@
 
 <rosparam command="load" file="$(find projet)/calib/simu_colours.yaml" />
 <rosparam command="load" file="$(find projet)/calib/last_sim_colours.yaml" />
-<rosparam command="load" file="$(find projet)/calib/simu_params.yaml" />
+<rosparam command="load" file="$(find projet)/calib/simu_paramsw_2.yaml" />
 
 
 <!-- <node name="process_image" pkg="projet" type="process.py"/> -->
